@@ -1,0 +1,63 @@
+# =========================
+# AIPhotoManager .gitignore
+# =========================
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+
+# --- Virtual Environment ---
+.venv/
+venv/
+env/
+
+# --- AI / Model Weights ---
+weights/
+models/
+*.pt
+*.pth
+*.onnx
+*.bin
+
+# --- User Data (照片/分类/数据库) ---
+photos/
+分类/
+output/
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+*.db
+identity_db.sqlite*
+person_db.sqlite*
+
+# --- Cache ---
+cache/
+analysis_cache.json
+feedback.json
+
+# --- IDE / Editor ---
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# --- OS / Sync ---
+.DS_Store
+Thumbs.db
+*.baiduyun.uploading.cfg
+desktop.ini
+
+# --- Test / Scratch ---
+t
+t/
+.scratch_5b2/
+.scratch*/
+*.bak
+新建 文本文档.py
