@@ -10,7 +10,7 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt, QSize, QTimer
 from PySide6.QtGui import QIcon, QPixmap, QFont
 from PySide6.QtWidgets import (
     QApplication,
@@ -33,6 +33,8 @@ from PySide6.QtWidgets import (
     QComboBox,
     QDialog,
     QSplitter,
+    QStackedWidget,
+    QGridLayout,
 )
 
 
@@ -68,12 +70,24 @@ def get_human_categories():
 
 class MainWindow(QMainWindow):
 
+    # 左侧导航项（顺序即 QStackedWidget 页索引）
+    NAV_ITEMS = [
+        "🏠  总览",
+        "🖼️  照片",
+        "🐾  兽装",
+        "👤  人物",
+        "🎭  角色",
+        "⭐  收藏",
+        "⚠️  待处理",
+        "⚙️  设置",
+    ]
+
     def __init__(self):
 
         super().__init__()
 
         self.setWindowTitle(
-            "AI Photo Manager V3.3"
+            "AI Photo Manager V4"
         )
 
         self.resize(
@@ -91,9 +105,23 @@ class MainWindow(QMainWindow):
 
         self.advisor = AIAdvisor()
 
+        # 总览刷新开关：构造期间为 False，避免 _switch_page 在
+        # 信号尚未连接 / 事件循环未启动时触发后端读取。
+        self._ui_ready = False
+
         self.init_ui()
 
         self.connect_signal()
+
+        self._ui_ready = True
+
+        # 启动后事件循环运转时刷新一次总览（测试无事件循环 → 不触发，
+        # 避免在测试进程中打开真实 identity_db）。
+        QTimer.singleShot(0, self._refresh_overview)
+
+    # ============================================================
+    # UI 构建
+    # ============================================================
 
     def init_ui(self):
 
@@ -103,21 +131,224 @@ class MainWindow(QMainWindow):
             central
         )
 
-        root = QVBoxLayout(
-            central
+        root = QHBoxLayout(central)
+        root.setContentsMargins(0, 0, 0, 0)
+        root.setSpacing(0)
+
+        # ---- 左侧导航栏 ----
+        self._build_nav(root)
+
+        # ---- 右侧内容区（堆栈） ----
+        self.content_stack = QStackedWidget()
+        self.content_stack.setStyleSheet("background:#f5f6fa;")
+
+        # 页 0：总览
+        self.overview_page = self._build_overview_page()
+        self.content_stack.addWidget(self.overview_page)
+
+        # 页 1：照片（承载原有全部功能）
+        self.photo_page = self._build_photo_page()
+        self.content_stack.addWidget(self.photo_page)
+
+        # 页 2-7：占位
+        for label in self.NAV_ITEMS[2:]:
+            self.content_stack.addWidget(
+                self._build_placeholder_page(label)
+            )
+
+        root.addWidget(self.content_stack, 1)
+
+        self.content_stack.setCurrentIndex(0)
+        self.nav_list.setCurrentRow(0)
+
+        self.setStatusBar(
+            QStatusBar()
         )
 
-        self.title_label = QLabel(
-            "AI Photo Manager V3.3"
+        self.statusBar().showMessage(
+            "程序启动完成"
         )
 
-        self.title_label.setStyleSheet(
-            "font-size:22px;font-weight:bold;"
-        )
+    # ------------------------------------------------------------
+    # 导航栏
+    # ------------------------------------------------------------
 
-        root.addWidget(
-            self.title_label
+    def _build_nav(self, parent_layout):
+
+        nav = QWidget()
+        nav.setFixedWidth(190)
+        nav.setStyleSheet("background:#2c3e50;")
+
+        nav_layout = QVBoxLayout(nav)
+        nav_layout.setContentsMargins(0, 18, 0, 0)
+        nav_layout.setSpacing(0)
+
+        brand = QLabel("AIPhotoManager")
+        brand.setStyleSheet(
+            "color:#ffffff;font-size:16px;font-weight:bold;"
+            "padding:0 18px 2px 18px;"
         )
+        nav_layout.addWidget(brand)
+
+        subtitle = QLabel("本地 AI 照片管理")
+        subtitle.setStyleSheet(
+            "color:#95a5a6;font-size:11px;padding:0 18px 18px 18px;"
+        )
+        nav_layout.addWidget(subtitle)
+
+        self.nav_list = QListWidget()
+        self.nav_list.setStyleSheet("""
+            QListWidget {
+                background: #2c3e50;
+                border: none;
+                outline: none;
+            }
+            QListWidget::item {
+                color: #ecf0f1;
+                padding: 13px 18px;
+                font-size: 14px;
+                border-left: 3px solid transparent;
+            }
+            QListWidget::item:selected {
+                background: #34495e;
+                border-left: 3px solid #3498db;
+                color: #ffffff;
+            }
+            QListWidget::item:hover {
+                background: #3a546b;
+            }
+        """)
+        self.nav_list.setFixedWidth(190)
+
+        for item_text in self.NAV_ITEMS:
+            self.nav_list.addItem(
+                QListWidgetItem(item_text)
+            )
+
+        nav_layout.addWidget(self.nav_list)
+        nav_layout.addStretch()
+
+        parent_layout.addWidget(nav)
+
+    # ------------------------------------------------------------
+    # 总览页
+    # ------------------------------------------------------------
+
+    def _build_overview_page(self):
+
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(36, 30, 36, 30)
+        layout.setSpacing(16)
+
+        title = QLabel("欢迎回来")
+        title.setStyleSheet(
+            "font-size:26px;font-weight:bold;color:#2c3e50;"
+        )
+        layout.addWidget(title)
+
+        subtitle = QLabel("本地 AI 照片管理 · 总览")
+        subtitle.setStyleSheet(
+            "font-size:13px;color:#7f8c8d;"
+        )
+        layout.addWidget(subtitle)
+
+        layout.addSpacing(8)
+
+        # 统计卡片网格 3x2
+        grid = QGridLayout()
+        grid.setSpacing(14)
+
+        self._stat_value_labels = {}
+
+        cards = [
+            ("analyzed",       "AI 已分析"),
+            ("fursuit_photos", "兽装照片"),
+            ("person_photos",  "人物照片"),
+            ("group_count",    "角色分组"),
+            ("feedback",       "人工反馈"),
+            ("favorites",      "收藏"),
+        ]
+
+        for idx, (key, label_text) in enumerate(cards):
+            card, value_label = self._make_stat_card(label_text)
+            grid.addWidget(card, idx // 3, idx % 3)
+            self._stat_value_labels[key] = value_label
+
+        layout.addLayout(grid)
+
+        layout.addSpacing(10)
+
+        # 待处理摘要
+        self._pending_label = QLabel("正在统计…")
+        self._pending_label.setStyleSheet(
+            "font-size:13px;color:#555;background:#ffffff;"
+            "border:1px solid #e0e0e0;border-radius:8px;padding:14px;"
+        )
+        self._pending_label.setWordWrap(True)
+        layout.addWidget(self._pending_label)
+
+        layout.addStretch()
+
+        # 刷新按钮
+        btn_row = QHBoxLayout()
+        btn_row.addStretch()
+        self.btn_refresh_overview = QPushButton("🔄 刷新统计")
+        self.btn_refresh_overview.setStyleSheet("""
+            QPushButton {
+                font-size:13px;padding:8px 20px;
+                background:#3498db;color:white;border:none;
+                border-radius:6px;font-weight:bold;
+            }
+            QPushButton:hover { background:#2980b9; }
+        """)
+        btn_row.addWidget(self.btn_refresh_overview)
+        layout.addLayout(btn_row)
+
+        return page
+
+    def _make_stat_card(self, title_text):
+
+        card = QFrame()
+        card.setStyleSheet("""
+            QFrame {
+                background:#ffffff;
+                border:1px solid #e0e0e0;
+                border-radius:10px;
+            }
+        """)
+        card.setMinimumSize(150, 110)
+
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(6)
+
+        value_label = QLabel("—")
+        value_label.setStyleSheet(
+            "font-size:34px;font-weight:bold;color:#2c3e50;"
+        )
+        value_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(value_label)
+
+        title_label = QLabel(title_text)
+        title_label.setStyleSheet(
+            "font-size:12px;color:#7f8c8d;"
+        )
+        title_label.setAlignment(Qt.AlignCenter)
+        layout.addWidget(title_label)
+
+        return card, value_label
+
+    # ------------------------------------------------------------
+    # 照片页（承载原有全部功能）
+    # ------------------------------------------------------------
+
+    def _build_photo_page(self):
+
+        page = QWidget()
+        root = QVBoxLayout(page)
+        root.setContentsMargins(12, 12, 12, 12)
+        root.setSpacing(8)
 
         search_layout = QHBoxLayout()
 
@@ -303,15 +534,205 @@ class MainWindow(QMainWindow):
             button_layout
         )
 
-        self.setStatusBar(
-            QStatusBar()
-        )
+        return page
 
-        self.statusBar().showMessage(
-            "程序启动完成"
+    # ------------------------------------------------------------
+    # 占位页
+    # ------------------------------------------------------------
+
+    def _build_placeholder_page(self, label_text):
+
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setAlignment(Qt.AlignCenter)
+
+        clean = label_text.strip()
+        hint = QLabel(f"{clean}\n\n（Phase 1 骨架 · 后续阶段实现）")
+        hint.setAlignment(Qt.AlignCenter)
+        hint.setStyleSheet(
+            "font-size:18px;color:#95a5a6;"
         )
+        layout.addWidget(hint)
+
+        return page
+
+    # ------------------------------------------------------------
+    # 页面切换
+    # ------------------------------------------------------------
+
+    def _switch_page(self, row):
+
+        if row < 0 or row >= self.content_stack.count():
+            return
+
+        self.content_stack.setCurrentIndex(row)
+
+        # 切到总览页时刷新统计（构造期间 _ui_ready=False 不触发，
+        # 避免测试进程打开真实库；启动后由 QTimer / 用户点击触发）
+        if row == 0 and self._ui_ready:
+            self._refresh_overview()
+
+    # ------------------------------------------------------------
+    # 总览数据
+    # ------------------------------------------------------------
+
+    def _refresh_overview(self):
+        """读取真实后端数据刷新总览统计。
+
+        全程 try/except 容错：任何后端读取失败时卡片显示「—」，
+        不影响窗口其余功能。
+        """
+        try:
+            stats = self._compute_overview_stats()
+        except Exception as e:
+            print(f"[总览] 统计读取失败: {e}")
+            stats = {}
+
+        mapping = {
+            "analyzed":       "analyzed",
+            "fursuit_photos": "fursuit_photos",
+            "person_photos":  "person_photos",
+            "group_count":    "group_count",
+            "feedback":       "feedback",
+        }
+        for key, stat_key in mapping.items():
+            label = self._stat_value_labels.get(key)
+            if label is None:
+                continue
+            val = stats.get(stat_key, "—")
+            label.setText(str(val))
+
+        # 收藏：后端无 favorites 表，如实标注
+        fav_label = self._stat_value_labels.get("favorites")
+        if fav_label is not None:
+            fav_label.setText("未实现")
+            fav_label.setStyleSheet(
+                "font-size:18px;font-weight:bold;color:#bdc3c7;"
+            )
+
+        # 待处理摘要
+        analyzed = stats.get("analyzed", 0)
+        avg_q = stats.get("avg_quality", 0.0)
+        group_count = stats.get("group_count", 0)
+        fur_grp = stats.get("fursuit_group_count", 0)
+        per_grp = stats.get("person_group_count", 0)
+        pending_text = (
+            f"已分析照片：{analyzed} 张　·　平均 AI 置信度：{avg_q*100:.1f}%\n"
+            f"角色分组：{group_count} 组（兽装 {fur_grp} / 人物 {per_grp}）\n"
+            f"提示：打开文件夹可查看待分析照片。"
+        )
+        self._pending_label.setText(pending_text)
+
+    def _compute_overview_stats(self):
+        """从现有后端 API 读取真实统计数字（只读，不写库/缓存）。
+
+        数据源：
+          - AnalysisCache.get_cache() → 已分析照片数 / 兽装/人物照片数 / 低置信度
+          - IdentityManager.get_groups() → 角色分组数
+          - feedback.json → 人工反馈数
+        """
+        stats = {
+            "analyzed": 0,
+            "fursuit_photos": 0,
+            "person_photos": 0,
+            "group_count": 0,
+            "fursuit_group_count": 0,
+            "person_group_count": 0,
+            "feedback": 0,
+            "avg_quality": 0.0,
+        }
+
+        # ---- AnalysisCache（已分析照片统计）----
+        # AnalysisCache 无公开遍历接口，._cache 为内存字典；
+        # 此处只读访问，不修改缓存。独立 try/except 容错。
+        try:
+            from core.analysis_cache import get_cache
+
+            cache = get_cache()
+            cache_dict = getattr(cache, "_cache", {})
+
+            analyzed = 0
+            fursuit_photos = 0
+            person_photos = 0
+            quality_sum = 0.0
+            quality_count = 0
+
+            for v in cache_dict.values():
+                if not isinstance(v, dict):
+                    continue
+                if v.get("category") is not None:
+                    analyzed += 1
+                quality = v.get("quality", 0)
+                try:
+                    quality = float(quality)
+                except (TypeError, ValueError):
+                    quality = 0
+                quality_sum += quality
+                quality_count += 1
+                l1 = v.get("layer1") or {}
+                l1_cn = ""
+                if isinstance(l1, dict):
+                    l1_cn = str(l1.get("label_cn", ""))
+                if "兽装" in l1_cn:
+                    fursuit_photos += 1
+                elif "普通人物" in l1_cn:
+                    person_photos += 1
+
+            stats["analyzed"] = analyzed
+            stats["fursuit_photos"] = fursuit_photos
+            stats["person_photos"] = person_photos
+            # quality 为 L1 top-1 概率（0-1），取平均值反映整体置信水平
+            stats["avg_quality"] = (
+                quality_sum / quality_count if quality_count else 0.0
+            )
+        except Exception as e:
+            print(f"[总览] 缓存读取失败（不影响其余统计）: {e}")
+
+        # ---- IdentityManager（角色分组统计，只读）----
+        # IdentityManager() 构造懒加载模型；get_groups() 纯 SELECT，
+        # 在已迁移的 v2 库上不产生任何写入。
+        # 独立 try/except：即便身份库读取失败，上方 cache 统计仍保留。
+        try:
+            from core.identity import IdentityManager
+
+            mgr = IdentityManager()
+            try:
+                groups = mgr.get_groups() or []
+                stats["group_count"] = len(groups)
+                stats["fursuit_group_count"] = sum(
+                    1 for g in groups
+                    if g.get("type") == "fursuit_character"
+                )
+                stats["person_group_count"] = sum(
+                    1 for g in groups
+                    if g.get("type") == "real_person"
+                )
+            finally:
+                mgr.close()
+        except Exception as e:
+            print(f"[总览] 身份库读取失败（不影响其余统计）: {e}")
+
+        # ---- 人工反馈数（feedback.json，只读计数）----
+        feedback_path = self.advisor.feedback_file
+        if feedback_path and os.path.exists(feedback_path):
+            try:
+                with open(feedback_path, "r", encoding="utf-8") as f:
+                    content = f.read().strip()
+                    stats["feedback"] = len(json.loads(content)) if content else 0
+            except (json.JSONDecodeError, IOError):
+                stats["feedback"] = 0
+
+        return stats
+
+    # ============================================================
+    # 信号连接
+    # ============================================================
 
     def connect_signal(self):
+
+        self.nav_list.currentRowChanged.connect(
+            self._switch_page
+        )
 
         self.btn_open.clicked.connect(
             self.open_folder
@@ -343,6 +764,10 @@ class MainWindow(QMainWindow):
 
         self.btn_video.clicked.connect(
             self.extract_video_frames
+        )
+
+        self.btn_refresh_overview.clicked.connect(
+            self._refresh_overview
         )
 
     def open_folder(self):
