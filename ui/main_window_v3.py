@@ -10,7 +10,7 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 
-from PySide6.QtCore import Qt, QSize, QTimer
+from PySide6.QtCore import Qt, QSize, QTimer, QEvent
 from PySide6.QtGui import QIcon, QPixmap, QFont
 from PySide6.QtWidgets import (
     QApplication,
@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QSplitter,
     QStackedWidget,
     QGridLayout,
+    QInputDialog,
 )
 
 
@@ -109,6 +110,16 @@ class MainWindow(QMainWindow):
         # 信号尚未连接 / 事件循环未启动时触发后端读取。
         self._ui_ready = False
 
+        # Phase 2：分组页面（兽装/人物/角色）状态容器
+        # 每页一个 dict，存 page_stack / 网格容器 / 标题 / 当前组 等
+        self._group_pages = {}
+        self._group_page_loaded = {
+            "fursuit": False, "person": False, "character": False
+        }
+        # 卡片/缩略图 → 业务对象映射，供 eventFilter 派发左键点击
+        self._card_group_map = {}    # QFrame → (page_key, group_dict, display_name)
+        self._tile_path_map = {}     # QLabel → (page_key, group_dict, image_path)
+
         self.init_ui()
 
         self.connect_signal()
@@ -150,8 +161,24 @@ class MainWindow(QMainWindow):
         self.photo_page = self._build_photo_page()
         self.content_stack.addWidget(self.photo_page)
 
-        # 页 2-7：占位
-        for label in self.NAV_ITEMS[2:]:
+        # 页 2：兽装 / 页 3：人物 / 页 4：角色（Phase 2 真实页面）
+        self.fursuit_page = self._build_groups_page(
+            "fursuit", "fursuit_character", "兽装角色", "兽装"
+        )
+        self.content_stack.addWidget(self.fursuit_page)
+
+        self.person_page = self._build_groups_page(
+            "person", "real_person", "人物角色", "人物"
+        )
+        self.content_stack.addWidget(self.person_page)
+
+        self.character_page = self._build_groups_page(
+            "character", None, "全部角色", "角色"
+        )
+        self.content_stack.addWidget(self.character_page)
+
+        # 页 5-7：占位（收藏 / 待处理 / 设置 → Phase 3）
+        for label in self.NAV_ITEMS[5:]:
             self.content_stack.addWidget(
                 self._build_placeholder_page(label)
             )
@@ -556,6 +583,416 @@ class MainWindow(QMainWindow):
 
         return page
 
+    # ============================================================
+    # Phase 2：分组浏览页面（兽装 / 人物 / 角色共用）
+    # ------------------------------------------------------------
+    # 结构：页内两级 QStackedWidget
+    #   [0] 组列表：统计栏 + 组网格（封面/名称/张数）
+    #   [1] 组内照片墙：返回 + 标题 + ✏️重命名 + 照片网格
+    #
+    # 名称优先级：group.name 非空 → 用户定义名；空 → 运行时默认名
+    #            「未命名{default_prefix} #001」（不写库）。
+    # 重命名：调 IdentityManager.update_name(character_id, name)，
+    #         仅写 identity_group.name 列（schema v1 起就有），
+    #         不改 schema / character_id / 聚类 / DBSCAN / Fursee。
+    # 数据源：只读 IdentityManager.get_groups()（v2 库上纯 SELECT）。
+    # 预览：点击组内照片 → 切到照片页 + 复用 show_preview（不新增预览）。
+    # ============================================================
+
+    def _build_groups_page(self, page_key, group_type_filter, page_title, default_prefix):
+        """构建分组浏览页面。返回 page widget，状态存入 self._group_pages。"""
+
+        page = QWidget()
+        page_layout = QVBoxLayout(page)
+        page_layout.setContentsMargins(36, 30, 36, 30)
+        page_layout.setSpacing(16)
+
+        title = QLabel(page_title)
+        title.setStyleSheet("font-size:22px;font-weight:bold;color:#2c3e50;")
+        page_layout.addWidget(title)
+
+        page_stack = QStackedWidget()
+
+        # ===== [0] 组列表视图 =====
+        list_view = QWidget()
+        list_layout = QVBoxLayout(list_view)
+        list_layout.setContentsMargins(0, 0, 0, 0)
+        list_layout.setSpacing(14)
+
+        stats_bar = QHBoxLayout()
+        stats_bar.setSpacing(20)
+        stats_label = QLabel("点击刷新加载…")
+        stats_label.setStyleSheet("font-size:13px;color:#34495e;")
+        stats_bar.addWidget(stats_label)
+        stats_bar.addStretch()
+        refresh_btn = QPushButton("🔄 刷新")
+        refresh_btn.setStyleSheet(
+            "QPushButton{background:#3498db;color:white;border:none;"
+            "padding:6px 16px;border-radius:4px;font-size:12px;}"
+            "QPushButton:hover{background:#2980b9;}"
+        )
+        stats_bar.addWidget(refresh_btn)
+        list_layout.addLayout(stats_bar)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setStyleSheet("QScrollArea{border:none;background:transparent;}")
+        grid_container = QWidget()
+        grid_layout = QGridLayout(grid_container)
+        grid_layout.setSpacing(14)
+        grid_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        grid_layout.setContentsMargins(0, 0, 0, 0)
+        scroll.setWidget(grid_container)
+        list_layout.addWidget(scroll, 1)
+
+        empty_label = QLabel("暂无数据")
+        empty_label.setAlignment(Qt.AlignCenter)
+        empty_label.setStyleSheet("font-size:16px;color:#95a5a6;padding:60px;")
+        empty_label.hide()
+        list_layout.addWidget(empty_label)
+
+        page_stack.addWidget(list_view)
+
+        # ===== [1] 组内照片墙 =====
+        wall_view = QWidget()
+        wall_layout = QVBoxLayout(wall_view)
+        wall_layout.setContentsMargins(0, 0, 0, 0)
+        wall_layout.setSpacing(14)
+
+        top_bar = QHBoxLayout()
+        top_bar.setSpacing(12)
+        back_btn = QPushButton("← 返回")
+        back_btn.setStyleSheet(
+            "QPushButton{background:#ecf0f1;color:#2c3e50;border:none;"
+            "padding:6px 14px;border-radius:4px;font-size:12px;}"
+            "QPushButton:hover{background:#d5dbdb;}"
+        )
+        top_bar.addWidget(back_btn)
+        wall_title = QLabel("")
+        wall_title.setStyleSheet("font-size:18px;font-weight:bold;color:#2c3e50;")
+        top_bar.addWidget(wall_title)
+        wall_count = QLabel("")
+        wall_count.setStyleSheet("font-size:13px;color:#7f8c8d;")
+        top_bar.addWidget(wall_count)
+        top_bar.addStretch()
+        rename_btn = QPushButton("✏️ 重命名")
+        rename_btn.setStyleSheet(
+            "QPushButton{background:#9b59b6;color:white;border:none;"
+            "padding:6px 14px;border-radius:4px;font-size:12px;}"
+            "QPushButton:hover{background:#8e44ad;}"
+        )
+        top_bar.addWidget(rename_btn)
+        wall_layout.addLayout(top_bar)
+
+        wall_scroll = QScrollArea()
+        wall_scroll.setWidgetResizable(True)
+        wall_scroll.setStyleSheet("QScrollArea{border:none;background:transparent;}")
+        wall_grid_container = QWidget()
+        wall_grid_layout = QGridLayout(wall_grid_container)
+        wall_grid_layout.setSpacing(10)
+        wall_grid_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        wall_grid_layout.setContentsMargins(0, 0, 0, 0)
+        wall_scroll.setWidget(wall_grid_container)
+        wall_layout.addWidget(wall_scroll, 1)
+
+        page_stack.addWidget(wall_view)
+
+        page_stack.setCurrentIndex(0)
+        page_layout.addWidget(page_stack, 1)
+
+        self._group_pages[page_key] = {
+            "page_stack": page_stack,
+            "group_type_filter": group_type_filter,
+            "default_prefix": default_prefix,
+            "stats_label": stats_label,
+            "grid_layout": grid_layout,
+            "grid_container": grid_container,
+            "empty_label": empty_label,
+            "refresh_btn": refresh_btn,
+            "back_btn": back_btn,
+            "wall_title": wall_title,
+            "wall_count": wall_count,
+            "rename_btn": rename_btn,
+            "wall_grid_layout": wall_grid_layout,
+            "wall_grid_container": wall_grid_container,
+            "current_group": None,
+            "current_display_name": "",
+            "groups": [],
+        }
+
+        refresh_btn.clicked.connect(lambda _, k=page_key: self._load_groups_into_page(k))
+        back_btn.clicked.connect(lambda _, k=page_key: self._back_to_group_list(k))
+        rename_btn.clicked.connect(lambda _, k=page_key: self._rename_current_group(k))
+
+        return page
+
+    def _dedup_paths(self, paths):
+        """按 path 去重保序（schema v2 同 path 多 detection 防御）。"""
+        seen = set()
+        out = []
+        for p in paths:
+            if p not in seen:
+                seen.add(p)
+                out.append(p)
+        return out
+
+    def _compute_display_name(self, group, idx, default_prefix):
+        """名称优先级：group.name 非空 → 用户名；空 → 运行时默认名。"""
+        name = (group.get("name") or "").strip()
+        if name:
+            return name
+        return f"未命名{default_prefix} #{idx:03d}"
+
+    def _clear_grid(self, grid_layout):
+        """清空 QGridLayout 内全部 widget。"""
+        while grid_layout.count():
+            item = grid_layout.takeAt(0)
+            w = item.widget()
+            if w:
+                w.setParent(None)
+                w.deleteLater()
+
+    def _load_groups_into_page(self, page_key):
+        """从 IdentityManager.get_groups() 读取并渲染组列表（只读）。"""
+        state = self._group_pages.get(page_key)
+        if state is None:
+            return
+        group_type_filter = state["group_type_filter"]
+        default_prefix = state["default_prefix"]
+
+        self._clear_grid(state["grid_layout"])
+        # 清理旧卡片映射
+        for card in list(self._card_group_map.keys()):
+            if self._card_group_map[card][0] == page_key:
+                self._card_group_map.pop(card, None)
+        state["empty_label"].show()
+        state["_has_data"] = False
+
+        groups = []
+        try:
+            from core.identity import IdentityManager
+            mgr = IdentityManager()
+            try:
+                groups = mgr.get_groups(group_type=group_type_filter) or []
+            finally:
+                mgr.close()
+        except Exception as e:
+            print(f"[分组页 {page_key}] 读取失败: {e}")
+            groups = []
+
+        state["groups"] = groups
+
+        if not groups:
+            state["stats_label"].setText("暂无数据")
+            return
+
+        state["_has_data"] = True
+        state["empty_label"].hide()
+
+        total_photos = sum(len(self._dedup_paths(g.get("images", []))) for g in groups)
+        state["stats_label"].setText(
+            f"共 {len(groups)} 个角色组 · {total_photos} 张照片"
+        )
+
+        cols = 4
+        for idx, group in enumerate(groups):
+            display_name = self._compute_display_name(group, idx + 1, default_prefix)
+            card = self._render_group_card(group, display_name, page_key)
+            r, c = divmod(idx, cols)
+            state["grid_layout"].addWidget(card, r, c)
+
+    def _render_group_card(self, group, display_name, page_key):
+        """渲染单个角色组卡片（QFrame，左键进组 / 右键重命名）。"""
+        card = QFrame()
+        card.setFixedSize(220, 240)
+        card.setStyleSheet(
+            "QFrame{background:white;border:1px solid #e1e4e8;border-radius:8px;}"
+            "QFrame:hover{border:1px solid #3498db;}"
+        )
+        card.setCursor(Qt.PointingHandCursor)
+        card.setContextMenuPolicy(Qt.CustomContextMenu)
+
+        layout = QVBoxLayout(card)
+        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setSpacing(6)
+
+        cover_path = group.get("cover_image") or (group.get("images") or [""])[0]
+        cover_label = QLabel()
+        cover_label.setFixedSize(200, 150)
+        cover_label.setAlignment(Qt.AlignCenter)
+        cover_label.setStyleSheet("background:#f0f2f5;border-radius:4px;")
+        pix = QPixmap(cover_path)
+        if not pix.isNull():
+            cover_label.setPixmap(
+                pix.scaled(200, 150, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+            )
+        else:
+            cover_label.setText("无封面")
+            cover_label.setStyleSheet(
+                "background:#f0f2f5;border-radius:4px;color:#bdc3c7;font-size:12px;"
+            )
+        layout.addWidget(cover_label)
+
+        name_label = QLabel(f"🐾  {display_name}")
+        name_label.setStyleSheet("font-size:14px;font-weight:bold;color:#2c3e50;")
+        name_label.setWordWrap(True)
+        layout.addWidget(name_label)
+
+        count = len(self._dedup_paths(group.get("images", [])))
+        count_label = QLabel(f"{count} 张照片")
+        count_label.setStyleSheet("font-size:12px;color:#7f8c8d;")
+        layout.addWidget(count_label)
+
+        self._card_group_map[card] = (page_key, group, display_name)
+        card.installEventFilter(self)
+        card.customContextMenuRequested.connect(
+            lambda pos, c=card, k=page_key: self._rename_group_via_card(k, c)
+        )
+        return card
+
+    def eventFilter(self, obj, event):
+        """卡片/缩略图左键点击派发。"""
+        if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+            if obj in self._card_group_map:
+                page_key, group, display_name = self._card_group_map[obj]
+                self._open_group(page_key, group, display_name)
+                return True
+            if obj in self._tile_path_map:
+                page_key, group, image_path = self._tile_path_map[obj]
+                self._open_photo_in_photo_page(group, image_path)
+                return True
+        return super().eventFilter(obj, event)
+
+    def _open_group(self, page_key, group, display_name):
+        """点击组卡片 → 切到组内照片墙。"""
+        state = self._group_pages.get(page_key)
+        if state is None:
+            return
+        images = self._dedup_paths(group.get("images", []))
+        state["current_group"] = group
+        state["current_display_name"] = display_name
+
+        state["wall_title"].setText(f"🐾  {display_name}")
+        state["wall_count"].setText(f"{len(images)} 张照片")
+
+        self._clear_grid(state["wall_grid_layout"])
+        for tile in list(self._tile_path_map.keys()):
+            if self._tile_path_map[tile][0] == page_key:
+                self._tile_path_map.pop(tile, None)
+
+        cols = 6
+        for idx, path in enumerate(images):
+            tile = self._render_photo_tile(path, page_key, group)
+            r, c = divmod(idx, cols)
+            state["wall_grid_layout"].addWidget(tile, r, c)
+
+        state["page_stack"].setCurrentIndex(1)
+
+    def _render_photo_tile(self, path, page_key, group):
+        """渲染单张照片缩略图（QLabel，左键 → 跳照片页预览）。"""
+        tile = QLabel()
+        tile.setFixedSize(110, 110)
+        tile.setAlignment(Qt.AlignCenter)
+        tile.setStyleSheet(
+            "background:#f0f2f5;border-radius:4px;border:1px solid #e1e4e8;"
+        )
+        tile.setCursor(Qt.PointingHandCursor)
+        pix = QPixmap(path)
+        if not pix.isNull():
+            tile.setPixmap(pix.scaled(108, 108, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        else:
+            tile.setText("无图")
+            tile.setStyleSheet(
+                "background:#f0f2f5;border-radius:4px;color:#bdc3c7;font-size:10px;"
+            )
+        self._tile_path_map[tile] = (page_key, group, path)
+        tile.installEventFilter(self)
+        return tile
+
+    def _back_to_group_list(self, page_key):
+        """返回组列表。"""
+        state = self._group_pages.get(page_key)
+        if state is None:
+            return
+        state["page_stack"].setCurrentIndex(0)
+
+    def _open_photo_in_photo_page(self, group, image_path):
+        """点击照片墙缩略图 → 切到照片页 + 填充该组照片 + 选中预览。
+
+        复用 Phase 1 的 image_list_widget + show_preview，不新增预览 widget。
+        """
+        images = self._dedup_paths(group.get("images", []))
+        if image_path not in images:
+            return
+        self.image_list = images
+        self.image_list_widget.clear()
+        for path in images:
+            item = QListWidgetItem(os.path.basename(path))
+            pix = QPixmap(path)
+            if not pix.isNull():
+                item.setIcon(
+                    QIcon(pix.scaled(110, 110, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                )
+            self.image_list_widget.addItem(item)
+        self.nav_list.setCurrentRow(1)
+        idx = images.index(image_path)
+        self.image_list_widget.setCurrentRow(idx)
+        self.statusBar().showMessage(
+            f"已在照片页打开：{os.path.basename(image_path)}"
+        )
+
+    def _rename_group_via_card(self, page_key, card):
+        """组卡片右键 → 重命名（定位到该卡片对应的组）。"""
+        info = self._card_group_map.get(card)
+        if info is None:
+            return
+        _, group, _ = info
+        self._do_rename(page_key, group)
+
+    def _rename_current_group(self, page_key):
+        """组内照片墙顶部 ✏️ → 重命名当前组。"""
+        state = self._group_pages.get(page_key)
+        if state is None:
+            return
+        group = state.get("current_group")
+        if group is None:
+            return
+        self._do_rename(page_key, group)
+
+    def _do_rename(self, page_key, group):
+        """执行重命名：弹输入框 → 调 update_name → 刷新当前页。
+
+        仅写 identity_group.name 列（schema v1 起就有的字段），不改
+        schema / character_id / 聚类 / DBSCAN / Fursee。空名或取消不写。
+        """
+        character_id = group.get("character_id") or ""
+        if not character_id:
+            return
+        old_name = (group.get("name") or "").strip()
+        text, ok = QInputDialog.getText(
+            self, "重命名角色组",
+            "输入新名称（留空或取消则保持原状，不写库）：",
+            text=old_name,
+        )
+        if not ok:
+            return
+        new_name = text.strip()
+        if not new_name:
+            return  # 空白：不写库（运行时显示默认名）
+        try:
+            from core.identity import IdentityManager
+            mgr = IdentityManager()
+            try:
+                mgr.update_name(character_id, new_name)
+            finally:
+                mgr.close()
+        except Exception as e:
+            QMessageBox.critical(self, "重命名失败", f"写入名称失败：{e}")
+            return
+        group["name"] = new_name  # 更新内存，避免刷新前显示旧值
+        self._load_groups_into_page(page_key)  # 重新读取（反映新名 + 重排序）
+        self.statusBar().showMessage(f"已重命名：{new_name}")
+
     # ------------------------------------------------------------
     # 页面切换
     # ------------------------------------------------------------
@@ -571,6 +1008,15 @@ class MainWindow(QMainWindow):
         # 避免测试进程打开真实库；启动后由 QTimer / 用户点击触发）
         if row == 0 and self._ui_ready:
             self._refresh_overview()
+
+        # Phase 2：切到分组页（兽装2/人物3/角色4）时懒加载组列表
+        # （同样受 _ui_ready 保护，避免测试进程触发后端读取）
+        if self._ui_ready:
+            page_key_map = {2: "fursuit", 3: "person", 4: "character"}
+            key = page_key_map.get(row)
+            if key and not self._group_page_loaded.get(key, False):
+                self._load_groups_into_page(key)
+                self._group_page_loaded[key] = True
 
     # ------------------------------------------------------------
     # 总览数据
