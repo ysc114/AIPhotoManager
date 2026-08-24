@@ -17,6 +17,9 @@ FurseeAdapter —— Fursee persistent Worker 的进程内封装（生产版，P
   - worker 崩溃自动检测；auto_restart 仅在"单次请求内"重试一次，绝不无限重启
   - 响应按 id 对齐：迟到/错位响应自动丢弃（防 timeout 后流错位）
   - python_exe 走配置项（默认 expanduser 解析，不写死用户名）
+  - B2：worker 使用独立 YOLO_CONFIG_DIR（启动前预初始化，仅注入
+    子进程 env，主进程环境零改动——根治 ultralytics settings
+    reset 警告污染 stdout 协议通道导致的 FurseeProtocolError 熔断）
   - Adapter 日志走自身 logger；不污染 worker stdout（协议通道只过 JSON）
 
 本模块与 Fursee 源码零耦合：所有推理在子进程 fursee_worker.py
@@ -102,6 +105,12 @@ def _default_python_exe() -> str:
     return os.path.join(os.path.expanduser("~"), ".conda", "envs", "fursee_test", "python.exe")
 
 
+def _default_yolo_config_dir() -> str:
+    # B2：worker 专用 Ultralytics 配置目录（与主进程及其他 conda 环境
+    # 的默认 %AppData%/Roaming/Ultralytics 完全隔离，杜绝 settings 乒乓 reset）
+    return os.path.join(os.path.expanduser("~"), ".aipm", "fursee_yolo_cfg")
+
+
 @dataclass
 class FurseeAdapterConfig:
     python_exe: str = field(default_factory=_default_python_exe)
@@ -111,6 +120,8 @@ class FurseeAdapterConfig:
     shutdown_timeout: float = 30.0
     warmup: bool = True               # READY 后用一张合成小图预热（吸收首图 ~500ms 热身）
     auto_restart: bool = True         # 请求中发现 worker 死亡时：重启一次并重试一次
+    yolo_config_dir: str = field(default_factory=_default_yolo_config_dir)  # B2 worker 隔离配置目录
+    preinit_timeout: float = 90.0     # B2 预初始化 import ultralytics（含 torch 冷启动）超时
 
 
 # ============================================================
@@ -277,6 +288,11 @@ class FurseeAdapter:
         if not os.path.isfile(self.cfg.worker_path):
             raise FurseeStartupError(f"worker_path not found: {self.cfg.worker_path}")
 
+        # B2：确保 worker 独立配置目录已预初始化（settings.json 存在），
+        # 避免 worker 首次 import ultralytics 时向 stdout 打印
+        # "Creating new Ultralytics Settings" 污染 NDJSON 协议通道
+        self._ensure_yolo_cfg()
+
         # 清理可能残留的旧进程，重建本世代的通信资源
         if self._proc is not None and self._proc.poll() is None:
             self._kill_proc()
@@ -284,12 +300,17 @@ class FurseeAdapter:
         self._resp_q = queue.Queue()
         self._stderr_tail = []
 
+        # B2：仅向子进程注入 YOLO_CONFIG_DIR（os.environ 副本，主进程环境不变）
+        worker_env = dict(os.environ)
+        worker_env["YOLO_CONFIG_DIR"] = self.cfg.yolo_config_dir
+
         try:
             self._proc = subprocess.Popen(
                 [self.cfg.python_exe, self.cfg.worker_path],
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
+                env=worker_env,
             )
         except OSError as e:
             self._state = "stopped"
@@ -314,6 +335,41 @@ class FurseeAdapter:
 
         if self.cfg.warmup:
             self._warmup()
+
+    def _ensure_yolo_cfg(self) -> None:
+        """B2：预初始化 worker 独立 YOLO 配置目录。
+
+        settings.json 已存在则直接返回（零开销）；缺失时用 worker 同一
+        解释器跑一次 `import ultralytics`（stdout/stderr 丢弃），让其在
+        该目录生成 settings.json。此后 worker 启动 import 时为静默加载，
+        不再打印 "Creating new Ultralytics Settings" 到 stdout 协议通道。
+        失败时抛 FurseeStartupError（含 stderr 摘要）。
+        """
+        settings_path = os.path.join(self.cfg.yolo_config_dir, "Ultralytics", "settings.json")
+        if os.path.isfile(settings_path):
+            return
+        try:
+            os.makedirs(self.cfg.yolo_config_dir, exist_ok=True)
+        except OSError as e:
+            raise FurseeStartupError(
+                f"cannot create yolo_config_dir: {self.cfg.yolo_config_dir} ({e})") from e
+        env = dict(os.environ)
+        env["YOLO_CONFIG_DIR"] = self.cfg.yolo_config_dir
+        try:
+            r = subprocess.run(
+                [self.cfg.python_exe, "-c", "import ultralytics"],
+                capture_output=True, timeout=self.cfg.preinit_timeout, env=env,
+            )
+        except subprocess.TimeoutExpired as e:
+            raise FurseeStartupError(
+                f"ultralytics pre-init timeout ({self.cfg.preinit_timeout}s)") from e
+        except OSError as e:
+            raise FurseeStartupError(f"pre-init spawn failed: {e}") from e
+        if not os.path.isfile(settings_path):
+            tail = r.stderr.decode("utf-8", "replace")[-300:] if r.stderr else ""
+            raise FurseeStartupError(
+                f"pre-init finished but settings.json not created at {settings_path}; "
+                f"rc={r.returncode}, stderr tail: {tail}")
 
     def _stdout_reader(self, proc, resp_q) -> None:
         """读 worker stdout（纯 JSON 行）；EOF 放入 None 哨兵。"""

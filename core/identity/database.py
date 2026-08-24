@@ -188,6 +188,100 @@ class IdentityDatabase:
         self.conn.execute("DELETE FROM identity_group WHERE id = ?", (group_id,))
         self.conn.commit()
 
+    def merge_group_members(self, target_id, source_ids):
+        """将源组的 detection 级成员转入目标组并删除源组。
+
+        只更新 identity_image.group_id，不重新写入 embedding 或元数据，
+        因而会原样保留 image_path、detection_index、bbox、confidence、
+        embedding 和 embedding_type。数据库 schema 不变。
+        """
+        target_id = str(target_id or "").strip()
+        source_ids = list(dict.fromkeys(
+            str(group_id or "").strip() for group_id in (source_ids or [])
+        ))
+        source_ids = [group_id for group_id in source_ids if group_id]
+        if not target_id:
+            raise ValueError("target_id 不能为空")
+        if target_id in source_ids:
+            raise ValueError("target_id 不能同时作为 source_id")
+        if not source_ids:
+            return {"target_id": target_id, "source_ids": [], "moved": 0}
+
+        placeholders = ",".join("?" for _ in source_ids)
+        with self.conn:
+            target = self.conn.execute(
+                "SELECT id, type, name, cover_image FROM identity_group WHERE id = ?",
+                (target_id,),
+            ).fetchone()
+            if target is None:
+                raise ValueError(f"目标角色组不存在：{target_id}")
+
+            source_rows = self.conn.execute(
+                f"SELECT id, type FROM identity_group WHERE id IN ({placeholders})",
+                source_ids,
+            ).fetchall()
+            found_ids = {row[0] for row in source_rows}
+            missing = [group_id for group_id in source_ids if group_id not in found_ids]
+            if missing:
+                raise ValueError(f"源角色组不存在：{', '.join(missing)}")
+            mismatched = [
+                row[0] for row in source_rows
+                if row[1] != target[1]
+            ]
+            if mismatched:
+                raise ValueError("只能合并相同类型的角色组")
+
+            target_types = {
+                row[0] for row in self.conn.execute(
+                    "SELECT DISTINCT embedding_type FROM identity_image "
+                    "WHERE group_id = ? AND embedding_type <> ''",
+                    (target_id,),
+                ).fetchall()
+            }
+            source_types = {
+                row[0] for row in self.conn.execute(
+                    f"SELECT DISTINCT embedding_type FROM identity_image "
+                    f"WHERE group_id IN ({placeholders}) AND embedding_type <> ''",
+                    source_ids,
+                ).fetchall()
+            }
+            if target_types and source_types and target_types != source_types:
+                raise ValueError(
+                    "Legacy 与 Fursee 角色组不能直接合并，请保持两类数据分离"
+                )
+
+            moved = self.conn.execute(
+                f"UPDATE identity_image SET group_id = ? "
+                f"WHERE group_id IN ({placeholders})",
+                [target_id, *source_ids],
+            ).rowcount
+
+            self.conn.execute(
+                f"DELETE FROM identity_group WHERE id IN ({placeholders})",
+                source_ids,
+            )
+
+            cover_image = target[3]
+            if not cover_image:
+                cover_row = self.conn.execute(
+                    "SELECT image_path FROM identity_image "
+                    "WHERE group_id = ? ORDER BY added_at ASC, id ASC LIMIT 1",
+                    (target_id,),
+                ).fetchone()
+                cover_image = cover_row[0] if cover_row else ""
+
+            self.conn.execute(
+                "UPDATE identity_group SET cover_image = ?, updated_at = ? "
+                "WHERE id = ?",
+                (cover_image, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), target_id),
+            )
+
+        return {
+            "target_id": target_id,
+            "source_ids": source_ids,
+            "moved": moved,
+        }
+
     def get_group_image_count(self, group_id):
         """组内照片数（按 image_path 去重）。
 

@@ -15,6 +15,15 @@
             "name": "",
             "type": "fursuit_character",
             "images": ["path1.jpg", "path2.jpg"],
+            "detections": [
+                {
+                    "image_path": "path1.jpg",
+                    "detection_index": 0,
+                    "bbox": "[x1, y1, x2, y2]",
+                    "confidence": 0.98,
+                    "embedding_type": "fursuit_fursee",
+                },
+            ],
             "cover_image": "path1.jpg",
             "count": 2,
         },
@@ -223,17 +232,50 @@ class IdentityManager:
             images = self.db.get_images_by_group(group["id"])
             if images is None:
                 continue
-            image_paths = [img["image_path"] for img in images if img is not None]
+            valid_images = [img for img in images if img is not None]
+            if group_type == "fursuit_character":
+                valid_images = [
+                    img for img in valid_images
+                    if img.get("embedding_type") == "fursuit_fursee"
+                ]
+            elif group_type == "real_person":
+                valid_images = [
+                    img for img in valid_images
+                    if img.get("embedding_type") == "face"
+                ]
+            image_paths = list(dict.fromkeys(
+                img["image_path"] for img in valid_images
+            ))
             if not image_paths:
                 continue
+            detections = [
+                {
+                    "image_path": img["image_path"],
+                    "detection_index": img.get("detection_index", 0),
+                    "bbox": img.get("bbox"),
+                    "confidence": img.get("confidence", 0.0),
+                    "embedding_type": img.get("embedding_type", ""),
+                }
+                for img in valid_images
+            ]
             result.append({
                 "character_id": group.get("id", ""),
                 "name": group.get("name", ""),
                 "type": group.get("type", ""),
                 "description": group.get("description", ""),
                 "images": image_paths,
-                "cover_image": group.get("cover_image") or image_paths[0],
+                "detections": detections,
+                "source_types": sorted(set(
+                    img.get("embedding_type", "") for img in valid_images
+                    if img.get("embedding_type")
+                )),
+                "cover_image": (
+                    group.get("cover_image")
+                    if group.get("cover_image") in image_paths
+                    else image_paths[0]
+                ),
                 "count": len(image_paths),
+                "detection_count": len(detections),
             })
         result.sort(key=lambda g: g.get("count", 0), reverse=True)
         return result
@@ -242,18 +284,8 @@ class IdentityManager:
         self.db.update_group(character_id, name=name)
 
     def merge_groups(self, target_id, source_ids):
-        for source_id in source_ids:
-            images = self.db.get_images_by_group(source_id)
-            for img in images:
-                self.db.add_image(
-                    group_id=target_id,
-                    image_path=img["image_path"],
-                    embedding_type=img.get("embedding_type", ""),
-                )
-            self.db.delete_group(source_id)
-        cover = self.db.get_group_cover(target_id)
-        if cover:
-            self.db.update_group(target_id, cover_image=cover)
+        """检测级安全合并角色组，保留全部 detection 元数据。"""
+        return self.db.merge_group_members(target_id, source_ids)
 
     def close(self):
         # 关闭 Fursee worker（若已启动）；失败不阻断数据库关闭

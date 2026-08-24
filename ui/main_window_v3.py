@@ -10,8 +10,16 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 
-from PySide6.QtCore import Qt, QSize, QTimer, QEvent
-from PySide6.QtGui import QIcon, QPixmap, QFont
+from PySide6.QtCore import Qt, QSize, QTimer, QEvent, QRect
+from PySide6.QtGui import (
+    QIcon,
+    QPixmap,
+    QFont,
+    QPainter,
+    QColor,
+    QPen,
+    QImageReader,
+)
 from PySide6.QtWidgets import (
     QApplication,
     QMainWindow,
@@ -32,6 +40,8 @@ from PySide6.QtWidgets import (
     QSizePolicy,
     QComboBox,
     QDialog,
+    QDialogButtonBox,
+    QAbstractItemView,
     QSplitter,
     QStackedWidget,
     QGridLayout,
@@ -97,10 +107,13 @@ class MainWindow(QMainWindow):
         )
 
         self.image_list = []
+        # 缩略图/预览缓存：避免同一张大图在卡片、照片墙、照片页反复解码。
+        self._pixmap_cache = {}
 
         self.classifier = None
 
         self.current_image_path = None
+        self._photo_detection_context = None
 
         self.current_ai_category = None
 
@@ -116,9 +129,10 @@ class MainWindow(QMainWindow):
         self._group_page_loaded = {
             "fursuit": False, "person": False, "character": False
         }
+        self._group_page_pending = {}
         # 卡片/缩略图 → 业务对象映射，供 eventFilter 派发左键点击
         self._card_group_map = {}    # QFrame → (page_key, group_dict, display_name)
-        self._tile_path_map = {}     # QLabel → (page_key, group_dict, image_path)
+        self._tile_path_map = {}     # QLabel → (page_key, group_dict, image_path, detection_index)
 
         self.init_ui()
 
@@ -682,6 +696,13 @@ class MainWindow(QMainWindow):
             "QPushButton:hover{background:#8e44ad;}"
         )
         top_bar.addWidget(rename_btn)
+        merge_btn = QPushButton("🔗 合并角色")
+        merge_btn.setStyleSheet(
+            "QPushButton{background:#16a085;color:white;border:none;"
+            "padding:6px 14px;border-radius:4px;font-size:12px;}"
+            "QPushButton:hover{background:#138d75;}"
+        )
+        top_bar.addWidget(merge_btn)
         wall_layout.addLayout(top_bar)
 
         wall_scroll = QScrollArea()
@@ -713,6 +734,7 @@ class MainWindow(QMainWindow):
             "wall_title": wall_title,
             "wall_count": wall_count,
             "rename_btn": rename_btn,
+            "merge_btn": merge_btn,
             "wall_grid_layout": wall_grid_layout,
             "wall_grid_container": wall_grid_container,
             "current_group": None,
@@ -723,6 +745,7 @@ class MainWindow(QMainWindow):
         refresh_btn.clicked.connect(lambda _, k=page_key: self._load_groups_into_page(k))
         back_btn.clicked.connect(lambda _, k=page_key: self._back_to_group_list(k))
         rename_btn.clicked.connect(lambda _, k=page_key: self._rename_current_group(k))
+        merge_btn.clicked.connect(lambda _, k=page_key: self._merge_current_group(k))
 
         return page
 
@@ -736,12 +759,259 @@ class MainWindow(QMainWindow):
                 out.append(p)
         return out
 
+    # ---------- detection 级展示支持（Phase 2.5，只读查询，不改后端） ----------
+    @staticmethod
+    def _resolve_display_path(path):
+        """将数据库中的相对路径解析为项目内的可读路径，不回写原值。"""
+        if not path:
+            return ""
+        raw_path = os.fspath(path)
+        if os.path.isabs(raw_path):
+            if Path(raw_path).is_file():
+                return raw_path
+            fallback = _project_root / "photos" / Path(raw_path).name
+            if fallback.is_file():
+                return str(fallback)
+            return raw_path
+        candidate = _project_root / Path(raw_path)
+        if candidate.is_file():
+            return str(candidate)
+        fallback = _project_root / "photos" / Path(raw_path).name
+        return str(fallback) if fallback.is_file() else raw_path
+
+    def _load_pixmap_cached(self, path, target_size=None):
+        """按显示尺寸读取并缓存图片，避免界面反复解码原始大图。"""
+        resolved = self._resolve_display_path(path)
+        if not resolved:
+            return QPixmap(), QSize()
+
+        size_key = None
+        if (
+            target_size
+            and target_size.isValid()
+            and target_size.width() > 0
+            and target_size.height() > 0
+        ):
+            size_key = (target_size.width(), target_size.height())
+        cache_key = (resolved, size_key)
+        cached = self._pixmap_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        reader = QImageReader(resolved)
+        reader.setAutoTransform(True)
+        original_size = reader.size()
+        if size_key and original_size.isValid():
+            requested_size = original_size.scaled(
+                QSize(*size_key),
+                Qt.KeepAspectRatio,
+            )
+            if requested_size.isValid():
+                reader.setScaledSize(requested_size)
+
+        image = reader.read()
+        pixmap = QPixmap.fromImage(image) if not image.isNull() else QPixmap()
+        result = (pixmap, original_size)
+
+        # 对浏览场景保留足够的近期图片，同时防止长时间运行无限占内存。
+        if len(self._pixmap_cache) >= 512:
+            self._pixmap_cache.pop(next(iter(self._pixmap_cache)))
+        self._pixmap_cache[cache_key] = result
+        return result
+
+    def _fetch_group_detections(self, group):
+        """只读查询该组的 (path, detection_index) → (bbox, embedding_type) 映射。
+
+        优先使用 get_groups() 已带出的 detection 数据；旧调用方或异常
+        数据没有 detections 时，再通过现有公开方法查询。任何失败返回
+        空 dict，UI 自动回退完整原图显示（legacy/异常数据安全兜底）。
+        """
+        cid = group.get("character_id") or ""
+        if not cid:
+            return {}
+        rows = group.get("detections") or []
+        if rows:
+            det_map = {}
+            for row in rows:
+                if not row:
+                    continue
+                key = (row.get("image_path"), row.get("detection_index", 0))
+                det_map[key] = (
+                    row.get("bbox"),
+                    row.get("embedding_type", ""),
+                )
+            if det_map:
+                return det_map
+        try:
+            from core.identity import IdentityManager
+            mgr = IdentityManager()
+            try:
+                rows = mgr.db.get_images_by_group(cid) or []
+            finally:
+                mgr.close()
+        except Exception as e:
+            print(f"[分组页] detection 查询失败（回退原图）: {e}")
+            return {}
+        det_map = {}
+        for row in rows:
+            if not row:
+                continue
+            key = (row.get("image_path"), row.get("detection_index"))
+            det_map[key] = (row.get("bbox"), row.get("embedding_type"))
+        return det_map
+
+    @staticmethod
+    def _parse_bbox(bbox_json, img_w, img_h):
+        """bbox JSON → QRect（像素）。兼容两种历史格式：
+
+        - fursuit_fursee：绝对像素 [x1, y1, x2, y2]（P-C4-C2 起写入）
+        - fursuit_visual / face：0-1 归一化 [x1, y1, x2, y2]（legacy）
+
+        判定规则：全部值 ≤ 1.0 且图片宽高 > 1 → 归一化坐标（乘以宽高）；
+        否则视为绝对像素。无效输入返回 None（调用方回退完整原图）。
+        """
+        if not bbox_json or img_w <= 0 or img_h <= 0:
+            return None
+        try:
+            vals = json.loads(bbox_json) if isinstance(bbox_json, str) else bbox_json
+            x1, y1, x2, y2 = (float(v) for v in vals[:4])
+        except (ValueError, TypeError, ZeroDivisionError):
+            return None
+        if any(v != v for v in (x1, y1, x2, y2)):  # NaN 防御
+            return None
+        if x1 >= x2 or y1 >= y2:
+            return None
+        if x2 <= 1.0 and y2 <= 1.0 and x1 >= 0.0 and y1 >= 0.0 and img_w > 1 and img_h > 1:
+            x1, y1, x2, y2 = x1 * img_w, y1 * img_h, x2 * img_w, y2 * img_h
+        # clamp 到图片边界并取整
+        x1 = max(0, min(int(x1), img_w - 1))
+        y1 = max(0, min(int(y1), img_h - 1))
+        x2 = max(x1 + 1, min(int(x2), img_w))
+        y2 = max(y1 + 1, min(int(y2), img_h))
+        return QRect(x1, y1, x2 - x1, y2 - y1)
+
+    def _pixmap_for_detection(self, path, det_info, target_size=None):
+        """加载 path 的 QPixmap；若 det_info 含有效 bbox → 返回裁剪后的主体图。
+
+        bbox 无效 / 解析失败 / 文件缺失 → 返回完整原图（或加载失败的空
+        QPixmap，调用方按现状显示"无封面/无图"）。
+        """
+        pix, original_size = self._load_pixmap_cached(path, target_size)
+        if pix.isNull():
+            return pix
+        bbox_json = det_info[0] if det_info else None
+        if not bbox_json or not original_size.isValid():
+            return pix
+        rect = self._parse_bbox(
+            bbox_json,
+            original_size.width(),
+            original_size.height(),
+        )
+        if rect is None:
+            return pix
+
+        if (
+            pix.width() != original_size.width()
+            or pix.height() != original_size.height()
+        ):
+            scale_x = pix.width() / original_size.width()
+            scale_y = pix.height() / original_size.height()
+            rect = QRect(
+                int(round(rect.x() * scale_x)),
+                int(round(rect.y() * scale_y)),
+                max(1, int(round(rect.width() * scale_x))),
+                max(1, int(round(rect.height() * scale_y))),
+            )
+        cropped = pix.copy(rect)
+        return cropped if not cropped.isNull() else pix
+
+    def _pixmap_for_full_preview(self, path, bbox=None, detection_index=None):
+        """加载完整原图并在预览尺寸上叠加当前 detection 的 bbox。"""
+        pix, original_size = self._load_pixmap_cached(
+            path,
+            self.preview_label.size(),
+        )
+        if pix.isNull():
+            return pix
+
+        target_size = self.preview_label.size()
+        if (
+            target_size.width() <= 0
+            or target_size.height() <= 0
+            or not original_size.isValid()
+        ):
+            return pix
+        scaled = pix.copy()
+        if not bbox:
+            return scaled
+
+        rect = self._parse_bbox(
+            bbox,
+            original_size.width(),
+            original_size.height(),
+        )
+        if rect is None:
+            return scaled
+
+        scale_x = scaled.width() / original_size.width()
+        scale_y = scaled.height() / original_size.height()
+        overlay_rect = QRect(
+            int(round(rect.x() * scale_x)),
+            int(round(rect.y() * scale_y)),
+            max(1, int(round(rect.width() * scale_x))),
+            max(1, int(round(rect.height() * scale_y))),
+        )
+        painter = QPainter(scaled)
+        # 保留完整原图，但压暗 bbox 外区域，让当前角色 detection 更明确。
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 95))
+        painter.drawRect(scaled.rect())
+
+        scaled_rect = QRect(
+            int(round(rect.x() * scale_x)),
+            int(round(rect.y() * scale_y)),
+            max(1, int(round(rect.width() * scale_x))),
+            max(1, int(round(rect.height() * scale_y))),
+        )
+        highlighted = pix.copy(scaled_rect).scaled(
+            overlay_rect.size(),
+            Qt.IgnoreAspectRatio,
+            Qt.SmoothTransformation,
+        )
+        painter.drawPixmap(overlay_rect.topLeft(), highlighted)
+
+        pen = QPen(QColor("#e74c3c"))
+        pen.setWidth(max(2, int(round(min(scale_x, scale_y) * 4))))
+        painter.setPen(pen)
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRect(overlay_rect)
+        if detection_index is not None:
+            painter.setPen(QColor("#e74c3c"))
+            painter.drawText(
+                overlay_rect.x() + 4,
+                max(18, overlay_rect.y() + 18),
+                f"detection #{detection_index}",
+            )
+        painter.end()
+        return scaled
+
     def _compute_display_name(self, group, idx, default_prefix):
         """名称优先级：group.name 非空 → 用户名；空 → 运行时默认名。"""
         name = (group.get("name") or "").strip()
         if name:
             return name
         return f"未命名{default_prefix} #{idx:03d}"
+
+    @staticmethod
+    def _format_source_types(group):
+        types = group.get("source_types") or []
+        if not types:
+            return ""
+        if types == ["fursuit_fursee"]:
+            return "Fursee"
+        if types == ["fursuit_visual"]:
+            return "Legacy"
+        return " + ".join(sorted({t for t in types if t}))
 
     def _clear_grid(self, grid_layout):
         """清空 QGridLayout 内全部 widget。"""
@@ -761,6 +1031,7 @@ class MainWindow(QMainWindow):
         default_prefix = state["default_prefix"]
 
         self._clear_grid(state["grid_layout"])
+        self._group_page_pending.pop(page_key, None)
         # 清理旧卡片映射
         for card in list(self._card_group_map.keys()):
             if self._card_group_map[card][0] == page_key:
@@ -795,11 +1066,46 @@ class MainWindow(QMainWindow):
         )
 
         cols = 4
+        pending = []
         for idx, group in enumerate(groups):
             display_name = self._compute_display_name(group, idx + 1, default_prefix)
+            pending.append((idx, group, display_name))
+        token = object()
+        self._group_page_pending[page_key] = {
+            "items": pending,
+            "index": 0,
+            "cols": cols,
+            "token": token,
+        }
+        self._append_group_cards(page_key, token=token)
+
+    def _append_group_cards(self, page_key, batch_size=12, token=None):
+        state = self._group_pages.get(page_key)
+        pending = self._group_page_pending.get(page_key)
+        if state is None or not pending:
+            return
+        if token is not None and pending.get("token") is not token:
+            return
+        items = pending.get("items") or []
+        start = pending.get("index", 0)
+        end = min(start + batch_size, len(items))
+        for idx, group, display_name in items[start:end]:
             card = self._render_group_card(group, display_name, page_key)
-            r, c = divmod(idx, cols)
+            r, c = divmod(idx, pending.get("cols", 4))
             state["grid_layout"].addWidget(card, r, c)
+        pending["index"] = end
+        if end < len(items):
+            current_token = pending.get("token")
+            QTimer.singleShot(
+                0,
+                lambda k=page_key, t=current_token: self._append_group_cards(
+                    k,
+                    batch_size,
+                    t,
+                ),
+            )
+        else:
+            self._group_page_pending.pop(page_key, None)
 
     def _render_group_card(self, group, display_name, page_key):
         """渲染单个角色组卡片（QFrame，左键进组 / 右键重命名）。"""
@@ -821,7 +1127,29 @@ class MainWindow(QMainWindow):
         cover_label.setFixedSize(200, 150)
         cover_label.setAlignment(Qt.AlignCenter)
         cover_label.setStyleSheet("background:#f0f2f5;border-radius:4px;")
-        pix = QPixmap(cover_path)
+        # 封面优先选该原图里置信度最高的 detection，避免同图多 detection
+        # 时封面随机落到别的主体上。
+        cover_det = None
+        cover_candidates = [
+            det for det in (group.get("detections") or [])
+            if det and det.get("image_path") == cover_path
+        ]
+        if cover_candidates:
+            cover_det = max(
+                cover_candidates,
+                key=lambda det: (
+                    float(det.get("confidence") or 0.0),
+                    -(int(det.get("detection_index") or 0)),
+                ),
+            )
+        pix = self._pixmap_for_detection(
+            cover_path,
+            (
+                cover_det.get("bbox"),
+                cover_det.get("embedding_type"),
+            ) if cover_det else None,
+            cover_label.size(),
+        )
         if not pix.isNull():
             cover_label.setPixmap(
                 pix.scaled(200, 150, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
@@ -837,6 +1165,11 @@ class MainWindow(QMainWindow):
         name_label.setStyleSheet("font-size:14px;font-weight:bold;color:#2c3e50;")
         name_label.setWordWrap(True)
         layout.addWidget(name_label)
+
+        source_label = QLabel(self._format_source_types(group))
+        source_label.setStyleSheet("font-size:11px;color:#7f8c8d;")
+        if source_label.text():
+            layout.addWidget(source_label)
 
         count = len(self._dedup_paths(group.get("images", [])))
         count_label = QLabel(f"{count} 张照片")
@@ -858,22 +1191,45 @@ class MainWindow(QMainWindow):
                 self._open_group(page_key, group, display_name)
                 return True
             if obj in self._tile_path_map:
-                page_key, group, image_path = self._tile_path_map[obj]
-                self._open_photo_in_photo_page(group, image_path)
+                page_key, group, image_path, detection_index = self._tile_path_map[obj]
+                self._open_photo_in_photo_page(group, image_path, detection_index)
                 return True
         return super().eventFilter(obj, event)
 
     def _open_group(self, page_key, group, display_name):
-        """点击组卡片 → 切到组内照片墙。"""
+        """点击组卡片 → 切到组内照片墙。
+
+        照片墙成员 = 该组的 detection 级成员（(path, detection_index)
+        复合键），同 path 不同 detection 是不同主体，各自一格显示
+        对应 bbox 裁剪；bbox 无效回退完整原图。
+        """
         state = self._group_pages.get(page_key)
         if state is None:
             return
-        images = self._dedup_paths(group.get("images", []))
+        det_map = self._fetch_group_detections(group)
+        # 复合键去重保序：相同 (path, det_idx) 去重；同 path 不同 det_idx 保留。
+        # det_map 为空（查询失败/异常兜底）→ 回退 path 级显示（完整原图）。
+        seen = set()
+        members = []
+        if det_map:
+            for key in sorted(det_map.keys(), key=lambda k: (k[0] or "", k[1] or 0)):
+                if key in seen or key[0] is None:
+                    continue
+                seen.add(key)
+                members.append(key)
+        else:
+            for path in self._dedup_paths(group.get("images", [])):
+                members.append((path, 0))
         state["current_group"] = group
         state["current_display_name"] = display_name
+        state["current_members"] = members
+        state["current_det_map"] = det_map
 
         state["wall_title"].setText(f"🐾  {display_name}")
-        state["wall_count"].setText(f"{len(images)} 张照片")
+        unique_photo_count = len({path for path, _ in members})
+        state["wall_count"].setText(
+            f"{len(members)} 个 detection · {unique_photo_count} 张原图"
+        )
 
         self._clear_grid(state["wall_grid_layout"])
         for tile in list(self._tile_path_map.keys()):
@@ -881,32 +1237,60 @@ class MainWindow(QMainWindow):
                 self._tile_path_map.pop(tile, None)
 
         cols = 6
-        for idx, path in enumerate(images):
-            tile = self._render_photo_tile(path, page_key, group)
+        for idx, (path, det_idx) in enumerate(members):
+            tile = self._render_photo_tile(path, det_idx, det_map.get((path, det_idx)), page_key, group)
             r, c = divmod(idx, cols)
             state["wall_grid_layout"].addWidget(tile, r, c)
 
         state["page_stack"].setCurrentIndex(1)
 
-    def _render_photo_tile(self, path, page_key, group):
-        """渲染单张照片缩略图（QLabel，左键 → 跳照片页预览）。"""
-        tile = QLabel()
-        tile.setFixedSize(110, 110)
-        tile.setAlignment(Qt.AlignCenter)
+    def _render_photo_tile(self, path, det_idx, det_info, page_key, group):
+        """渲染单张主体缩略图并显示 detection 编号。
+
+        显示该 detection 的 bbox 裁剪；bbox 无效回退完整原图。
+        """
+        tile = QFrame()
+        tile.setFixedSize(122, 138)
         tile.setStyleSheet(
-            "background:#f0f2f5;border-radius:4px;border:1px solid #e1e4e8;"
+            "QFrame{background:#f0f2f5;border-radius:4px;border:1px solid #e1e4e8;}"
         )
         tile.setCursor(Qt.PointingHandCursor)
-        pix = QPixmap(path)
+        tile.setToolTip(f"detection #{det_idx}")
+        tile_layout = QVBoxLayout(tile)
+        tile_layout.setContentsMargins(5, 4, 5, 4)
+        tile_layout.setSpacing(2)
+
+        image_label = QLabel()
+        image_label.setFixedSize(110, 110)
+        image_label.setAlignment(Qt.AlignCenter)
+        image_label.setStyleSheet("background:transparent;border:none;")
+        image_label.setCursor(Qt.PointingHandCursor)
+        pix = self._pixmap_for_detection(path, det_info, image_label.size())
         if not pix.isNull():
-            tile.setPixmap(pix.scaled(108, 108, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-        else:
-            tile.setText("无图")
-            tile.setStyleSheet(
-                "background:#f0f2f5;border-radius:4px;color:#bdc3c7;font-size:10px;"
+            image_label.setPixmap(
+                pix.scaled(110, 110, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             )
-        self._tile_path_map[tile] = (page_key, group, path)
-        tile.installEventFilter(self)
+        else:
+            image_label.setText("无图")
+            image_label.setStyleSheet(
+                "background:transparent;border:none;color:#bdc3c7;font-size:10px;"
+            )
+
+        caption = QLabel(f"detection #{det_idx}")
+        caption.setFixedHeight(15)
+        caption.setAlignment(Qt.AlignCenter)
+        caption.setStyleSheet(
+            "background:transparent;border:none;color:#566573;font-size:10px;"
+        )
+        caption.setCursor(Qt.PointingHandCursor)
+
+        tile_layout.addWidget(image_label, 0, Qt.AlignCenter)
+        tile_layout.addWidget(caption, 0, Qt.AlignCenter)
+
+        mapping = (page_key, group, path, det_idx)
+        for widget in (tile, image_label, caption):
+            self._tile_path_map[widget] = mapping
+            widget.installEventFilter(self)
         return tile
 
     def _back_to_group_list(self, page_key):
@@ -916,29 +1300,48 @@ class MainWindow(QMainWindow):
             return
         state["page_stack"].setCurrentIndex(0)
 
-    def _open_photo_in_photo_page(self, group, image_path):
+    def _open_photo_in_photo_page(self, group, image_path, detection_index=None):
         """点击照片墙缩略图 → 切到照片页 + 填充该组照片 + 选中预览。
 
         复用 Phase 1 的 image_list_widget + show_preview，不新增预览 widget。
+        detection_index 只用于保留点击来源的 detection 语义；照片页仍显示
+        该角色出现过的完整原图。
         """
-        images = self._dedup_paths(group.get("images", []))
-        if image_path not in images:
+        raw_images = self._dedup_paths(group.get("images", []))
+        if image_path not in raw_images:
             return
+        images = [self._resolve_display_path(path) for path in raw_images]
+        det_map = self._fetch_group_detections(group)
+        selected_info = (
+            det_map.get((image_path, detection_index))
+            if detection_index is not None
+            else None
+        )
+        idx = raw_images.index(image_path)
         self.image_list = images
+        self._photo_detection_context = {
+            "row": idx,
+            "path": self._resolve_display_path(image_path),
+            "bbox": selected_info[0] if selected_info else None,
+            "detection_index": detection_index,
+            "group_name": self._compute_display_name(
+                group, 1, "角色"
+            ),
+        }
         self.image_list_widget.clear()
         for path in images:
             item = QListWidgetItem(os.path.basename(path))
-            pix = QPixmap(path)
+            pix = QPixmap(self._resolve_display_path(path))
             if not pix.isNull():
                 item.setIcon(
                     QIcon(pix.scaled(110, 110, Qt.KeepAspectRatio, Qt.SmoothTransformation))
                 )
             self.image_list_widget.addItem(item)
         self.nav_list.setCurrentRow(1)
-        idx = images.index(image_path)
         self.image_list_widget.setCurrentRow(idx)
         self.statusBar().showMessage(
             f"已在照片页打开：{os.path.basename(image_path)}"
+            + (f"（detection {detection_index}）" if detection_index is not None else "")
         )
 
     def _rename_group_via_card(self, page_key, card):
@@ -958,6 +1361,99 @@ class MainWindow(QMainWindow):
         if group is None:
             return
         self._do_rename(page_key, group)
+
+    def _merge_current_group(self, page_key):
+        """将选中的其他同类型角色组并入当前组，保留 detection 全字段。"""
+        state = self._group_pages.get(page_key)
+        if state is None:
+            return
+        target = state.get("current_group")
+        if not target:
+            return
+        target_id = target.get("character_id") or ""
+        candidates = [
+            group for group in state.get("groups", [])
+            if group.get("character_id")
+            and group.get("character_id") != target_id
+            and group.get("type") == target.get("type")
+        ]
+        if not candidates:
+            QMessageBox.information(self, "无法合并", "当前页面没有可合并的同类型角色组。")
+            return
+
+        dialog = QDialog(self)
+        dialog.setWindowTitle("合并角色组")
+        dialog.resize(520, 560)
+        layout = QVBoxLayout(dialog)
+        hint = QLabel("选择要并入当前角色组的其他角色组：")
+        hint.setWordWrap(True)
+        layout.addWidget(hint)
+
+        group_list = QListWidget()
+        group_list.setSelectionMode(QAbstractItemView.MultiSelection)
+        page_index = {
+            group.get("character_id"): idx + 1
+            for idx, group in enumerate(state.get("groups", []))
+        }
+        for group in candidates:
+            idx = page_index.get(group.get("character_id"), 0)
+            display_name = self._compute_display_name(
+                group, idx, state.get("default_prefix", "角色")
+            )
+            item = QListWidgetItem(
+                f"{display_name} · {len(self._dedup_paths(group.get('images', [])))} 张照片"
+            )
+            item.setData(Qt.UserRole, group.get("character_id"))
+            group_list.addItem(item)
+        layout.addWidget(group_list, 1)
+
+        buttons = QDialogButtonBox(
+            QDialogButtonBox.Ok | QDialogButtonBox.Cancel
+        )
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        if dialog.exec() != QDialog.Accepted:
+            return
+        source_ids = [
+            item.data(Qt.UserRole)
+            for item in group_list.selectedItems()
+            if item.data(Qt.UserRole)
+        ]
+        if not source_ids:
+            QMessageBox.information(self, "未选择角色组", "请至少选择一个要合并的角色组。")
+            return
+        confirm = QMessageBox.question(
+            self,
+            "确认合并",
+            f"将 {len(source_ids)} 个角色组合并到“"
+            f"{self._compute_display_name(target, page_index.get(target_id, 1), state.get('default_prefix', '角色'))}”，"
+            "并保留所有 detection、裁剪框和特征数据？",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+
+        try:
+            from core.identity import IdentityManager
+            mgr = IdentityManager()
+            try:
+                result = mgr.merge_groups(target_id, source_ids)
+            finally:
+                mgr.close()
+        except Exception as e:
+            QMessageBox.critical(self, "合并失败", f"角色组合并失败：{e}")
+            return
+
+        state["page_stack"].setCurrentIndex(0)
+        state["current_group"] = None
+        self._load_groups_into_page(page_key)
+        self.statusBar().showMessage(
+            f"已合并 {len(result.get('source_ids', source_ids))} 个角色组，"
+            f"保留 {result.get('moved', 0)} 条 detection"
+        )
 
     def _do_rename(self, page_key, group):
         """执行重命名：弹输入框 → 调 update_name → 刷新当前页。
@@ -1242,21 +1738,17 @@ class MainWindow(QMainWindow):
             return
 
         self.image_list = images
+        self._photo_detection_context = None
         self.image_list_widget.clear()
 
         for path in images:
             item = QListWidgetItem(
                 os.path.basename(path)
             )
-            pix = QPixmap(path)
+            pix, _ = self._load_pixmap_cached(path, QSize(110, 110))
             if not pix.isNull():
                 icon = QIcon(
-                    pix.scaled(
-                        110,
-                        110,
-                        Qt.KeepAspectRatio,
-                        Qt.SmoothTransformation
-                    )
+                    pix.scaled(110, 110, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 )
                 item.setIcon(icon)
             self.image_list_widget.addItem(item)
@@ -1271,14 +1763,29 @@ class MainWindow(QMainWindow):
             return
 
         path = self.image_list[row]
-        pix = QPixmap(path)
+        resolved_path = self._resolve_display_path(path)
+        context = self._photo_detection_context or {}
+        has_context = (
+            context.get("row") == row
+            and context.get("path") == resolved_path
+        )
+        pix = (
+            self._pixmap_for_full_preview(
+                path,
+                context.get("bbox"),
+                context.get("detection_index"),
+            )
+            if has_context
+            else self._load_pixmap_cached(path, self.preview_label.size())[0]
+        )
 
         if not pix.isNull():
-            pix = pix.scaled(
-                self.preview_label.size(),
-                Qt.KeepAspectRatio,
-                Qt.SmoothTransformation
-            )
+            if not has_context:
+                pix = pix.scaled(
+                    self.preview_label.size(),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation
+                )
             self.preview_label.setPixmap(pix)
 
         try:
@@ -1287,11 +1794,18 @@ class MainWindow(QMainWindow):
                 os.path.getmtime(path)
             )
             if self.default_info_label.isVisible():
+                extra = ""
+                if has_context and context.get("detection_index") is not None:
+                    extra = (
+                        f"\n角色：{context.get('group_name', '')}"
+                        f"\n检测：#{context.get('detection_index')}"
+                    )
                 self.default_info_label.setText(
                     f"文件：{os.path.basename(path)}\n"
                     f"大小：{size:.2f} MB\n"
                     f"时间：{time}\n"
                     f"路径：{path}"
+                    f"{extra}"
                 )
         except Exception as e:
             if self.default_info_label.isVisible():
@@ -1703,6 +2217,7 @@ class MainWindow(QMainWindow):
 
         keyword = self.search_edit.text().strip()
 
+        self._photo_detection_context = None
         self.image_list_widget.clear()
 
         if not keyword:
@@ -1718,15 +2233,10 @@ class MainWindow(QMainWindow):
             item = QListWidgetItem(
                 os.path.basename(path)
             )
-            pix = QPixmap(path)
+            pix, _ = self._load_pixmap_cached(path, QSize(110, 110))
             if not pix.isNull():
                 icon = QIcon(
-                    pix.scaled(
-                        110,
-                        110,
-                        Qt.KeepAspectRatio,
-                        Qt.SmoothTransformation
-                    )
+                    pix.scaled(110, 110, Qt.KeepAspectRatio, Qt.SmoothTransformation)
                 )
                 item.setIcon(icon)
             self.image_list_widget.addItem(item)
