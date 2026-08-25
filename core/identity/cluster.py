@@ -26,16 +26,125 @@ class IdentityCluster:
         self.db = database
 
     def run(self, embedding_type=None):
+        if embedding_type is None:
+            raise ValueError(
+                "禁止无参全量聚类：会重建 face/fursuit_visual/fursuit_fursee "
+                "全部角色组并拆散人工合并关系。请显式指定 embedding_type，"
+                "或使用 incremental_assign() 增量分配。"
+            )
         stats = {}
-        if embedding_type is None or embedding_type == "face":
+        if embedding_type == "face":
             stats["face"] = self._cluster_by_type("face", eps=0.4, min_samples=1)
-        if embedding_type is None or embedding_type == "fursuit_visual":
+        if embedding_type == "fursuit_visual":
             stats["fursuit_visual"] = self._cluster_by_type("fursuit_visual", eps=0.3, min_samples=1)
-        if embedding_type is None or embedding_type == "fursuit_fursee":
+        if embedding_type == "fursuit_fursee":
             stats["fursuit_fursee"] = self._cluster_by_type(
                 "fursuit_fursee", eps=0.6481, min_samples=1, metric="euclidean"
             )
         return stats
+
+    def incremental_assign(self, embedding_type="fursuit_fursee",
+                           threshold=0.79, margin=0.02):
+        """增量分配：未分配 detection 只与已有角色组比较，加入或新建。
+
+        Incremental Assignment（P-C4-C5 定稿，2026-08-25）：
+        - 绝不对全部数据重跑 DBSCAN；已有行的 group_id **零改动**
+          （人工「合并角色」确认的关系永久保留）
+        - 只处理 embedding_type 匹配且 group_id='' 的"未分配"行
+          （新照片分析写入的新 detection，每行独立判定）
+        - 每个新 det：
+            max_cos ≥ threshold          → 加入最高相似度已有组
+            最高与次高差距 < margin      → 保守不合并（保持未分配，
+                                            等待人工确认，避免错误合并）
+            全部 < threshold             → 创建新角色组
+        - 幂等：重复调用时已分配行不再处理；冲突行保持未分配不重复建组
+        - 阈值 0.79 = P-C4-C3 人眼终审（cosine_threshold，与
+          DBSCAN eps=0.6481 等价：L2 归一化下 cos = 1 - L2²/2）
+
+        返回 {"joined": int, "created": int,
+              "conflicts": [dict], "pending": int}
+        """
+        records = self.db.get_all_embeddings(
+            embedding_type=embedding_type, include_detection_index=True
+        )
+        # records: (image_path, detection_index, embedding, embedding_type, group_id)
+        existing = [r for r in records if r[4]]
+        pending = [r for r in records if not r[4]]
+        if not pending:
+            return {"joined": 0, "created": 0, "conflicts": [], "pending": 0}
+
+        # 已有角色组代表 = 组内成员 embedding 的归一化 centroid
+        groups = {}
+        for path, det, emb, etype, gid in existing:
+            groups.setdefault(gid, []).append(np.asarray(emb, dtype=np.float64))
+        representatives = {}
+        for gid, vecs in groups.items():
+            centroid = np.mean(vecs, axis=0)
+            norm = np.linalg.norm(centroid)
+            if norm > 0:
+                representatives[gid] = centroid / norm
+
+        def _cos(a, b):
+            a = np.asarray(a, dtype=np.float64)
+            b = np.asarray(b, dtype=np.float64)
+            na, nb = np.linalg.norm(a), np.linalg.norm(b)
+            if na == 0 or nb == 0:
+                return 0.0
+            return float(np.dot(a, b) / (na * nb))
+
+        joined = 0
+        created = 0
+        conflicts = []
+        group_type = "real_person" if embedding_type == "face" else "fursuit_character"
+
+        for path, det, emb, etype, gid in pending:
+            scores = [
+                (g, _cos(emb, rep)) for g, rep in representatives.items()
+            ]
+            if not scores:
+                # 没有任何已有组 → 创建新角色组
+                new_gid = self.db.create_group(group_type=group_type)
+                self._assign_group(new_gid, path, det, embedding_type)
+                created += 1
+                continue
+
+            scores.sort(key=lambda x: -x[1])
+            top, second = scores[0], scores[1] if len(scores) > 1 else None
+
+            if top[1] >= threshold:
+                if second is not None and (top[1] - second[1]) < margin:
+                    # 最高/次高几乎并列 → 保守不自动合并，保持未分配待人工
+                    conflicts.append({
+                        "image_path": path,
+                        "detection_index": det,
+                        "top_group": top[0],
+                        "top_cos": round(top[1], 4),
+                        "second_group": second[0],
+                        "second_cos": round(second[1], 4),
+                    })
+                    continue
+                self._assign_group(top[0], path, det, embedding_type)
+                joined += 1
+            else:
+                new_gid = self.db.create_group(group_type=group_type)
+                self._assign_group(new_gid, path, det, embedding_type)
+                created += 1
+
+        return {
+            "joined": joined,
+            "created": created,
+            "conflicts": conflicts,
+            "pending": len(pending),
+        }
+
+    def _assign_group(self, group_id, image_path, detection_index, embedding_type):
+        """仅按复合键精确更新单行 group_id（不动其他行/其他字段）。"""
+        self.db.conn.execute(
+            "UPDATE identity_image SET group_id = ? "
+            "WHERE image_path = ? AND detection_index = ? AND embedding_type = ?",
+            (group_id, image_path, detection_index, embedding_type),
+        )
+        self.db.conn.commit()
 
     def _cluster_by_type(self, emb_type, eps, min_samples, metric="cosine"):
         # fursuit_fursee 行按复合键 (path, detection_index) 唯一，

@@ -88,7 +88,15 @@ class IdentityManager:
 
         if progress_callback:
             progress_callback(total, total, "正在聚类...")
-        self.cluster.run()
+        # 第三阶段（2026-08-25）：禁止无参全量聚类（会重建全部组并拆散
+        # 人工合并）。改为增量分配：新 detection 只加入已有组或新建组，
+        # 已有行 group_id 零改动；face 阈值由旧 eps=0.4 换算 cos=0.92。
+        self.cluster.incremental_assign(
+            embedding_type="fursuit_fursee", threshold=0.79, margin=0.02
+        )
+        self.cluster.incremental_assign(
+            embedding_type="face", threshold=0.92, margin=0.02
+        )
 
         groups = self.get_groups()
         if progress_callback:
@@ -286,6 +294,95 @@ class IdentityManager:
     def merge_groups(self, target_id, source_ids):
         """检测级安全合并角色组，保留全部 detection 元数据。"""
         return self.db.merge_group_members(target_id, source_ids)
+
+    def analyze_new_photos(self, photos_dir=None, progress_callback=None):
+        """增量分析：扫描 photos/ 中未入库照片，Fursee 入库 + 定向聚类。
+
+        安全设计（P-C4-C4 踩坑后固化）：
+        - 只处理 identity_image 中不存在的 image_path（_process_single_image
+          内部还有整图 path 查重，双保险；旧 fursuit_visual 冻结不受影响）
+        - 聚类使用 incremental_assign（Incremental Assignment）：新 detection
+          只与已有角色组逐组比较（cosine ≥ 0.79 加入已有组 / < 0.79 新建组 /
+          最高与次高差距 < 0.02 保守不合并），**不重跑 DBSCAN、不拆散任何
+          已有组**（人工「合并角色」确认的关系永久保留）
+        - 单张失败不中断，计数并继续
+
+        返回 {"scanned": 扫描图片数, "new": 新增处理数,
+              "skipped": 已存在数, "failed": 失败数}
+        """
+        if photos_dir is None:
+            photos_dir = os.path.join(os.path.dirname(self.db.db_path), "photos")
+        if not os.path.isdir(photos_dir):
+            return {"scanned": 0, "new": 0, "skipped": 0, "failed": 0}
+
+        exts = {".jpg", ".jpeg", ".png", ".webp"}
+        files = sorted(
+            f for f in os.listdir(photos_dir)
+            if os.path.splitext(f)[1].lower() in exts
+        )
+        existing = {
+            row[0] for row in self.db.conn.execute(
+                "SELECT DISTINCT image_path FROM identity_image"
+            )
+        }
+        new_files = [
+            os.path.join(photos_dir, f).replace("\\", "/")
+            for f in files
+            if os.path.join(photos_dir, f).replace("\\", "/") not in existing
+        ]
+        # MD5 内容级去重（防再发生）：photos/ 中同一图片的 (1) 副本文件
+        # 文件名不同但内容相同——按 path 查重拦不住，会各自入库建组造成
+        # "重复角色"。这里对未入库文件计算 MD5，与已入库图片的 MD5 比对，
+        # 内容重复的副本直接跳过（不重复分析、不重复建组）。
+        if new_files:
+            import hashlib
+            known_md5 = set()
+            for p in existing:
+                if os.path.exists(p):
+                    try:
+                        with open(p, "rb") as fh:
+                            known_md5.add(hashlib.md5(fh.read()).hexdigest())
+                    except OSError:
+                        pass
+            kept = []
+            for p in new_files:
+                try:
+                    with open(p, "rb") as fh:
+                        m = hashlib.md5(fh.read()).hexdigest()
+                    if m in known_md5:
+                        continue  # 与已入库图片内容相同 → 副本，跳过
+                    kept.append(p)
+                except OSError:
+                    kept.append(p)  # 读不到按原逻辑处理
+            new_files = kept
+        total = len(new_files)
+        failed = 0
+        for i, path in enumerate(new_files, 1):
+            try:
+                self._process_single_image(path)
+            except Exception as e:
+                failed += 1
+                print(f"[analyze_new_photos] 失败 {os.path.basename(path)}: {e}")
+            if progress_callback:
+                progress_callback(i, total)
+        if total:
+            try:
+                assign_result = self.cluster.incremental_assign(
+                    embedding_type="fursuit_fursee",
+                    threshold=0.79,
+                    margin=0.02,
+                )
+                print(f"[analyze_new_photos] 增量分配: "
+                      f"加入{assign_result['joined']} 新建{assign_result['created']} "
+                      f"冲突{len(assign_result['conflicts'])}")
+            except Exception as e:
+                print(f"[analyze_new_photos] 增量聚类失败: {e}")
+        return {
+            "scanned": len(files),
+            "new": total,
+            "skipped": len(files) - total,
+            "failed": failed,
+        }
 
     def close(self):
         # 关闭 Fursee worker（若已启动）；失败不阻断数据库关闭

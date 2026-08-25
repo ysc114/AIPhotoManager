@@ -47,9 +47,11 @@ class AIClassifier:
         else:
             raise TypeError("analyze expects a file path string or an object with a .path attribute")
 
-        # 查缓存
+        # 查缓存（2026-08-25 修复：空 dict {} 为历史遗留脏数据，视为
+        # 无效缓存——若命中空值会短路真实分析，导致该照片永远无法重新
+        # L1 分类入库。仅非空有效结果才命中；None / {} 均重新分析。）
         cached = self.cache.get(image_path)
-        if cached is not None:
+        if cached:
             print(f"[缓存] 命中: {image_path}")
             return {
                 "category": cached.get("category"),

@@ -19,6 +19,7 @@ from PySide6.QtGui import (
     QColor,
     QPen,
     QImageReader,
+    QImageIOHandler,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -109,6 +110,8 @@ class MainWindow(QMainWindow):
         self.image_list = []
         # 缩略图/预览缓存：避免同一张大图在卡片、照片墙、照片页反复解码。
         self._pixmap_cache = {}
+        # 方案A：detection 主体裁剪图缓存（先裁后缩），key=(path, bbox, target)
+        self._det_crop_cache = {}
 
         self.classifier = None
 
@@ -646,6 +649,13 @@ class MainWindow(QMainWindow):
             "QPushButton:hover{background:#2980b9;}"
         )
         stats_bar.addWidget(refresh_btn)
+        analyze_btn = QPushButton("📥 分析新照片")
+        analyze_btn.setStyleSheet(
+            "QPushButton{background:#27ae60;color:white;border:none;"
+            "padding:6px 16px;border-radius:4px;font-size:12px;}"
+            "QPushButton:hover{background:#219a52;}"
+        )
+        stats_bar.addWidget(analyze_btn)
         list_layout.addLayout(stats_bar)
 
         scroll = QScrollArea()
@@ -743,6 +753,7 @@ class MainWindow(QMainWindow):
         }
 
         refresh_btn.clicked.connect(lambda _, k=page_key: self._load_groups_into_page(k))
+        analyze_btn.clicked.connect(lambda _, k=page_key: self._analyze_new_photos(k))
         back_btn.clicked.connect(lambda _, k=page_key: self._back_to_group_list(k))
         rename_btn.clicked.connect(lambda _, k=page_key: self._rename_current_group(k))
         merge_btn.clicked.connect(lambda _, k=page_key: self._merge_current_group(k))
@@ -890,40 +901,123 @@ class MainWindow(QMainWindow):
         y2 = max(y1 + 1, min(int(y2), img_h))
         return QRect(x1, y1, x2 - x1, y2 - y1)
 
+    @staticmethod
+    def _display_rect_to_raw(rect, raw_w, raw_h, transform):
+        """把「显示方向」的 bbox rect 映射回「原始图像方向」坐标。
+
+        Fursee 的 bbox 由 YOLO 在已按 EXIF 旋转的图上检测（显示方向）；
+        QImageReader.setClipRect 需要原始图像坐标，故需逆变换。
+        仅处理 3 种常见方向（None/Rotate180/Rotate90=EXIF6）；其余
+        组合（镜像等极罕见）返回 None → 调用方回退整图。
+        """
+        T = QImageIOHandler.Transformation
+        if transform == T.TransformationNone:
+            return QRect(rect)
+        if transform == T.TransformationRotate180:
+            return QRect(
+                raw_w - rect.x() - rect.width(),
+                raw_h - rect.y() - rect.height(),
+                rect.width(),
+                rect.height(),
+            )
+        if transform == T.TransformationRotate90:
+            # EXIF 6（显示 = 原始顺时针旋转 90°）：逆映射 x=yd, y=H-(xd+wd)
+            return QRect(
+                rect.y(),
+                raw_h - rect.x() - rect.width(),
+                rect.height(),
+                rect.width(),
+            )
+        return None  # 镜像/270° 组合，回退整图（安全）
+
+    def _load_detection_crop(self, path, bbox_json, target_size=None):
+        """方案A：先裁后缩加载 detection 主体图（2026-08-24 修复）。
+
+        旧实现「先缩整图→再裁 bbox」，裁剪分辨率 = 目标尺寸×bbox占比，
+        小主体被压成几十像素再放大 → 缩略图糊。本方法用
+        QImageReader.setClipRect(原始坐标 bbox) + setScaledSize(目标)，
+        解码器直接输出「裁剪+缩放」结果，裁剪分辨率 = min(bbox 原始像素,
+        目标尺寸)，保证清晰且不整图解码（内存友好）。
+
+        EXIF 旋转：bbox 为显示方向坐标，先经 _display_rect_to_raw 逆映射
+        到原始坐标再裁剪；setAutoTransform 负责把输出旋转回显示方向。
+        """
+        resolved = self._resolve_display_path(path)
+        if not resolved:
+            return QPixmap()
+        size_key = None
+        if (
+            target_size
+            and target_size.isValid()
+            and target_size.width() > 0
+            and target_size.height() > 0
+        ):
+            size_key = (target_size.width(), target_size.height())
+        cache_key = (resolved, bbox_json, size_key)
+        cached = self._det_crop_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        probe = QImageReader(resolved)
+        raw_size = probe.size()
+        if not raw_size.isValid():
+            return QPixmap()
+        transform = probe.transformation()
+
+        rect = self._parse_bbox(
+            bbox_json,
+            raw_size.width(),
+            raw_size.height(),
+        )
+        if rect is None:
+            return QPixmap()
+        raw_rect = self._display_rect_to_raw(
+            rect,
+            raw_size.width(),
+            raw_size.height(),
+            transform,
+        )
+        if raw_rect is None:
+            return QPixmap()
+
+        reader = QImageReader(resolved)
+        reader.setAutoTransform(True)
+        reader.setClipRect(raw_rect)
+        # 注意：不用 setScaledSize —— 它与 clipRect 组合时走 JPEG DCT 快速缩放，
+        # 输出宽高比会失真（实测 0.94 比例的 bbox 输出 0.8 比例）。改为裁剪区域
+        # 原始分辨率解码（JPEG 插件支持局部解码，内存可控）后手动等比缩放，
+        # 比例严格等于 bbox、清晰度 = min(bbox 原始像素, 目标尺寸)。
+        image = reader.read()
+        pixmap = QPixmap.fromImage(image) if not image.isNull() else QPixmap()
+        if pixmap.isNull():
+            return pixmap
+        if size_key:
+            pixmap = pixmap.scaled(
+                QSize(*size_key),
+                Qt.KeepAspectRatio,
+                Qt.SmoothTransformation,
+            )
+
+        if len(self._det_crop_cache) >= 512:
+            self._det_crop_cache.pop(next(iter(self._det_crop_cache)))
+        self._det_crop_cache[cache_key] = pixmap
+        return pixmap
+
     def _pixmap_for_detection(self, path, det_info, target_size=None):
         """加载 path 的 QPixmap；若 det_info 含有效 bbox → 返回裁剪后的主体图。
 
-        bbox 无效 / 解析失败 / 文件缺失 → 返回完整原图（或加载失败的空
-        QPixmap，调用方按现状显示"无封面/无图"）。
+        方案A（2026-08-24）：有 bbox 时走 _load_detection_crop「先裁后缩」，
+        裁剪分辨率 = min(bbox 原始像素, 目标尺寸)，修复旧实现「先缩后裁」
+        导致的小图放大模糊。bbox 无效 / 解析失败 / 文件缺失 → 回退完整
+        原图（安全兜底）。
         """
-        pix, original_size = self._load_pixmap_cached(path, target_size)
-        if pix.isNull():
-            return pix
         bbox_json = det_info[0] if det_info else None
-        if not bbox_json or not original_size.isValid():
-            return pix
-        rect = self._parse_bbox(
-            bbox_json,
-            original_size.width(),
-            original_size.height(),
-        )
-        if rect is None:
-            return pix
-
-        if (
-            pix.width() != original_size.width()
-            or pix.height() != original_size.height()
-        ):
-            scale_x = pix.width() / original_size.width()
-            scale_y = pix.height() / original_size.height()
-            rect = QRect(
-                int(round(rect.x() * scale_x)),
-                int(round(rect.y() * scale_y)),
-                max(1, int(round(rect.width() * scale_x))),
-                max(1, int(round(rect.height() * scale_y))),
-            )
-        cropped = pix.copy(rect)
-        return cropped if not cropped.isNull() else pix
+        if bbox_json:
+            cropped = self._load_detection_crop(path, bbox_json, target_size)
+            if not cropped.isNull():
+                return cropped
+        pix, _ = self._load_pixmap_cached(path, target_size)
+        return pix
 
     def _pixmap_for_full_preview(self, path, bbox=None, detection_index=None):
         """加载完整原图并在预览尺寸上叠加当前 detection 的 bbox。"""
@@ -1021,6 +1115,37 @@ class MainWindow(QMainWindow):
             if w:
                 w.setParent(None)
                 w.deleteLater()
+
+    def _analyze_new_photos(self, page_key):
+        """一键增量分析：photos/ 未入库照片 → Fursee 入库 → 定向聚类 → 刷新。
+
+        同步执行（首次 177 张约数分钟，期间等待光标）；仅处理未入库照片
+        （已存在跳过），聚类只定向 fursuit_fursee（eps=0.6481 生产参数），
+        不动 face / fursuit_visual / 既有组。完成后自动刷新组列表。
+        """
+        from core.identity import IdentityManager
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            mgr = IdentityManager()
+            try:
+                result = mgr.analyze_new_photos()
+            finally:
+                mgr.close()
+        except Exception as e:
+            QApplication.restoreOverrideCursor()
+            QMessageBox.critical(self, "分析失败", f"分析新照片时出错：{e}")
+            return
+        QApplication.restoreOverrideCursor()
+        self._load_groups_into_page(page_key)
+        QMessageBox.information(
+            self,
+            "分析完成",
+            f"扫描 {result['scanned']} 张\n"
+            f"新增入库 {result['new']} 张\n"
+            f"已存在跳过 {result['skipped']} 张\n"
+            f"失败 {result['failed']} 张\n\n"
+            f"新角色已按 eps=0.6481 生产参数聚类，列表已刷新。",
+        )
 
     def _load_groups_into_page(self, page_key):
         """从 IdentityManager.get_groups() 读取并渲染组列表（只读）。"""
