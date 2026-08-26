@@ -78,6 +78,13 @@ class IdentityDatabase:
                 ON identity_image(image_path);
             CREATE INDEX IF NOT EXISTS idx_identity_group_type
                 ON identity_group(type);
+
+            -- 收藏（照片级，UI Phase 3-1）：image_path 主键天然防重复，
+            -- 不关联 detection/embedding/character_id，不影响角色归属。
+            CREATE TABLE IF NOT EXISTS favorite_image (
+                image_path TEXT PRIMARY KEY,
+                created_at TEXT DEFAULT ''
+            );
         """)
         self.conn.commit()
 
@@ -432,6 +439,39 @@ class IdentityDatabase:
                 (image_path, detection_index)
             )
         self.conn.commit()
+
+    # ============================================================
+    # 收藏（UI Phase 3-1，照片级；不动角色/detection/embedding）
+    # ============================================================
+
+    def add_favorite(self, image_path):
+        """收藏一张照片（image_path 主键，重复收藏幂等）。"""
+        self.conn.execute(
+            "INSERT OR IGNORE INTO favorite_image (image_path, created_at) VALUES (?, ?)",
+            (image_path, datetime.now().strftime("%Y-%m-%d %H:%M:%S")),
+        )
+        self.conn.commit()
+
+    def remove_favorite(self, image_path):
+        """取消收藏。"""
+        self.conn.execute(
+            "DELETE FROM favorite_image WHERE image_path = ?", (image_path,)
+        )
+        self.conn.commit()
+
+    def list_favorites(self):
+        """全部收藏照片路径（按收藏时间倒序）。"""
+        rows = self.conn.execute(
+            "SELECT image_path FROM favorite_image ORDER BY created_at DESC"
+        ).fetchall()
+        return [r[0] for r in rows]
+
+    def is_favorite(self, image_path):
+        """是否已收藏。"""
+        row = self.conn.execute(
+            "SELECT 1 FROM favorite_image WHERE image_path = ?", (image_path,)
+        ).fetchone()
+        return row is not None
 
     def _row_to_dict(self, row, columns):
         return {col: row[i] for i, col in enumerate(columns)}

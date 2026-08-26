@@ -232,7 +232,16 @@ class IdentityManager:
     # ============================================================
 
     def get_groups(self, group_type=None):
-        groups = self.db.get_all_groups(group_type=group_type)
+        """获取角色组列表。
+
+        group_type:
+            None              → 全部组（含 Legacy fursuit_visual，仅内部/调试用）
+            "fursuit_character" → 只保留 fursuit_fursee 成员（兽装页）
+            "real_person"       → 只保留 face 成员（人物页）
+            "all"               → 兽装 + 人物（排除 Legacy；角色页）
+        """
+        db_filter = None if group_type == "all" else group_type
+        groups = self.db.get_all_groups(group_type=db_filter)
         result = []
         for group in groups:
             if group is None:
@@ -250,6 +259,11 @@ class IdentityManager:
                 valid_images = [
                     img for img in valid_images
                     if img.get("embedding_type") == "face"
+                ]
+            elif group_type == "all":
+                valid_images = [
+                    img for img in valid_images
+                    if img.get("embedding_type") in ("fursuit_fursee", "face")
                 ]
             image_paths = list(dict.fromkeys(
                 img["image_path"] for img in valid_images
@@ -377,11 +391,149 @@ class IdentityManager:
                       f"冲突{len(assign_result['conflicts'])}")
             except Exception as e:
                 print(f"[analyze_new_photos] 增量聚类失败: {e}")
+            # Face 增量（与 analyze_paths 对齐）：新人物照片归入已有/新建
+            # 人物组；不动 fursuit_visual / fursee 已有组。
+            try:
+                self.cluster.incremental_assign(
+                    embedding_type="face", threshold=0.92, margin=0.02
+                )
+            except Exception as e:
+                print(f"[analyze_new_photos] Face 增量分配失败: {e}")
         return {
             "scanned": len(files),
             "new": total,
             "skipped": len(files) - total,
             "failed": failed,
+        }
+
+    def analyze_paths(self, paths, progress_callback=None):
+        """增量分析用户选择的文件列表（GUI「添加照片」入口）。
+
+        与 analyze_new_photos 共用同一条安全增量链路：
+        - 只处理 identity_image 中不存在的 image_path（path 查重）
+        - MD5 内容级去重：与已入库图片 MD5 相同的副本跳过；同一批内
+          MD5 相同的文件只处理第一个（批内去重，防同批 (1) 副本）
+        - 逐张 _process_single_image：L1 路由（fursuit → Fursee /
+          person → face / 其他 → 不写身份库）
+        - 尾部 incremental_assign：fursuit_fursee(0.79, 0.02) +
+          face(0.92, 0.02)，**不重跑 DBSCAN、不拆散已有组**
+        - 兽装绝不走旧 CLIP fursuit_visual 链路（fursuit_visual 冻结）
+
+        progress_callback: cb(current, total, status_str)
+
+        返回 {"scanned", "new", "fursuit", "person", "other",
+              "dup_path", "dup_md5", "failed",
+              "joined_fursee", "created_fursee",
+              "joined_face", "created_face"}
+        """
+        if not paths:
+            return {"scanned": 0, "new": 0, "fursuit": 0, "person": 0,
+                    "other": 0, "dup_path": 0, "dup_md5": 0, "failed": 0,
+                    "joined_fursee": 0, "created_fursee": 0,
+                    "joined_face": 0, "created_face": 0}
+
+        exts = {".jpg", ".jpeg", ".png", ".webp"}
+        # 归一化 + 过滤非图片 + path 去重保序
+        norm_paths = []
+        seen_path = set()
+        for raw in paths:
+            p = str(raw).replace("\\", "/")
+            if os.path.splitext(p)[1].lower() not in exts:
+                continue
+            if p in seen_path:
+                continue
+            seen_path.add(p)
+            norm_paths.append(p)
+
+        existing = {
+            row[0] for row in self.db.conn.execute(
+                "SELECT DISTINCT image_path FROM identity_image"
+            )
+        }
+
+        # 已入库图片的 MD5 集合（一次计算，供内容级去重）
+        import hashlib
+        known_md5 = set()
+        for p in existing:
+            if os.path.exists(p):
+                try:
+                    with open(p, "rb") as fh:
+                        known_md5.add(hashlib.md5(fh.read()).hexdigest())
+                except OSError:
+                    pass
+
+        to_process = []
+        dup_path = dup_md5 = 0
+        batch_md5 = set()
+        for p in norm_paths:
+            if p in existing:
+                dup_path += 1
+                continue
+            try:
+                with open(p, "rb") as fh:
+                    m = hashlib.md5(fh.read()).hexdigest()
+            except OSError:
+                to_process.append(p)  # 读不到按原逻辑处理
+                continue
+            if m in known_md5 or m in batch_md5:
+                dup_md5 += 1
+                continue
+            batch_md5.add(m)
+            to_process.append(p)
+
+        total = len(to_process)
+        n_fursuit = n_person = n_other = failed = 0
+        for i, path in enumerate(to_process, 1):
+            try:
+                # L1 路由统计（与 _process_single_image 内部一致；缓存命中）
+                l1_info = self.embedder.get_l1_info(path)
+                route = self.embedder.route_l1(l1_info)
+                if route == "fursuit":
+                    n_fursuit += 1
+                elif route == "person":
+                    n_person += 1
+                else:
+                    n_other += 1
+                self._process_single_image(path)
+            except Exception as e:
+                failed += 1
+                print(f"[analyze_paths] 失败 {os.path.basename(path)}: {e}")
+            if progress_callback:
+                progress_callback(i, total, os.path.basename(path))
+
+        joined_fursee = created_fursee = 0
+        joined_face = created_face = 0
+        if total:
+            try:
+                r = self.cluster.incremental_assign(
+                    embedding_type="fursuit_fursee", threshold=0.79, margin=0.02
+                )
+                joined_fursee = r.get("joined", 0)
+                created_fursee = r.get("created", 0)
+            except Exception as e:
+                print(f"[analyze_paths] Fursee 增量分配失败: {e}")
+            try:
+                r = self.cluster.incremental_assign(
+                    embedding_type="face", threshold=0.92, margin=0.02
+                )
+                joined_face = r.get("joined", 0)
+                created_face = r.get("created", 0)
+            except Exception as e:
+                print(f"[analyze_paths] Face 增量分配失败: {e}")
+
+        return {
+            "scanned": len(norm_paths),
+            "new": total,
+            "fursuit": n_fursuit,
+            "person": n_person,
+            "other": n_other,
+            "dup_path": dup_path,
+            "dup_md5": dup_md5,
+            "failed": failed,
+            "joined_fursee": joined_fursee,
+            "created_fursee": created_fursee,
+            "joined_face": joined_face,
+            "created_face": created_face,
         }
 
     def close(self):

@@ -48,17 +48,19 @@ class DetectionAwareUiTests(unittest.TestCase):
             window._open_group("fursuit", group, "测试角色")
             state = window._group_pages["fursuit"]
 
+            # 新规则（2026-08-26）：同 path 多 detection → 只显示 1 格，
+            # 取 confidence 最高的 detection（det1 conf 0.91 > det2 0.89）。
             self.assertEqual(
                 state["current_members"],
-                [(photo_path, 1), (photo_path, 2)],
+                [(photo_path, 1)],
             )
-            self.assertEqual(state["wall_count"].text(), "2 个 detection · 1 张原图")
+            self.assertEqual(state["wall_count"].text(), "1 张照片")
 
-            window._open_photo_in_photo_page(group, photo_path, 2)
+            window._open_photo_in_photo_page(group, photo_path, 1)
             self.app.processEvents()
             self.assertEqual(
                 window._photo_detection_context["detection_index"],
-                2,
+                1,
             )
             plain = window._pixmap_for_full_preview(photo_path)
             window.show_preview(0)

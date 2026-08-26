@@ -10,7 +10,7 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 
-from PySide6.QtCore import Qt, QSize, QTimer, QEvent, QRect
+from PySide6.QtCore import Qt, QSize, QTimer, QEvent, QRect, QThread, Signal
 from PySide6.QtGui import (
     QIcon,
     QPixmap,
@@ -112,6 +112,9 @@ class MainWindow(QMainWindow):
         self._pixmap_cache = {}
         # 方案A：detection 主体裁剪图缓存（先裁后缩），key=(path, bbox, target)
         self._det_crop_cache = {}
+        # 照片内容 MD5 临时内存缓存（image_path → md5），仅用于 UI 照片墙
+        # 去重，不落库、不新增字段；每次会话启动后首次计算后复用。
+        self._path_md5_cache = {}
 
         self.classifier = None
 
@@ -190,15 +193,17 @@ class MainWindow(QMainWindow):
         self.content_stack.addWidget(self.person_page)
 
         self.character_page = self._build_groups_page(
-            "character", None, "全部角色", "角色"
+            "character", "all", "全部角色", "角色"
         )
         self.content_stack.addWidget(self.character_page)
 
-        # 页 5-7：占位（收藏 / 待处理 / 设置 → Phase 3）
-        for label in self.NAV_ITEMS[5:]:
-            self.content_stack.addWidget(
-                self._build_placeholder_page(label)
-            )
+        # 页 5-7：收藏（真页面）/ 待处理（真页面）/ 设置（真页面）
+        self.favorites_page = self._build_favorites_page()
+        self.content_stack.addWidget(self.favorites_page)
+        self.pending_page = self._build_pending_page()
+        self.content_stack.addWidget(self.pending_page)
+        self.settings_page = self._build_settings_page()
+        self.content_stack.addWidget(self.settings_page)
 
         root.addWidget(self.content_stack, 1)
 
@@ -414,6 +419,24 @@ class MainWindow(QMainWindow):
             self.btn_search
         )
 
+        self.btn_fav_toggle = QPushButton("⭐ 收藏当前")
+        self.btn_fav_toggle.setStyleSheet(
+            "QPushButton{background:#f39c12;color:white;border:none;"
+            "padding:6px 14px;border-radius:6px;font-size:12px;font-weight:bold;}"
+            "QPushButton:hover{background:#e67e22;}"
+        )
+        self.btn_fav_toggle.clicked.connect(self._toggle_favorite_current)
+        search_layout.addWidget(self.btn_fav_toggle)
+
+        self.btn_fav_page = QPushButton("♥ 收藏页")
+        self.btn_fav_page.setStyleSheet(
+            "QPushButton{background:#e74c3c;color:white;border:none;"
+            "padding:6px 14px;border-radius:6px;font-size:12px;font-weight:bold;}"
+            "QPushButton:hover{background:#c0392b;}"
+        )
+        self.btn_fav_page.clicked.connect(lambda: self._switch_page(5))
+        search_layout.addWidget(self.btn_fav_page)
+
         root.addLayout(
             search_layout
         )
@@ -579,6 +602,553 @@ class MainWindow(QMainWindow):
         )
 
         return page
+
+    # ------------------------------------------------------------
+    # 设置页（Phase 3-3：只读信息，不允许改 AI 参数）
+    # ------------------------------------------------------------
+
+    def _build_settings_page(self):
+        """设置页：只读展示 AI/数据库/版本信息（不提供修改入口）。"""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(36, 30, 36, 30)
+        layout.setSpacing(16)
+
+        title = QLabel("⚙️ 设置")
+        title.setStyleSheet("font-size:22px;font-weight:bold;color:#2c3e50;")
+        layout.addWidget(title)
+
+        note = QLabel("只读信息页。AI 参数为定稿值，暂不支持修改。")
+        note.setStyleSheet("font-size:12px;color:#7f8c8d;")
+        layout.addWidget(note)
+
+        def kv(text, color="#2c3e50"):
+            lab = QLabel(text)
+            lab.setStyleSheet(
+                f"font-size:13px;color:{color};background:#f8f9fa;"
+                "border:1px solid #e0e0e0;border-radius:6px;padding:10px;"
+            )
+            lab.setWordWrap(True)
+            return lab
+
+        # 构造阶段不连库（避免 WAL 副作用）；切页时刷新实际状态
+        placeholder = [
+            ("🤖 L1 分类器", "CLIP（AIClassifier）"),
+            ("🐾 Fursee 兽装识别", "FurseeAdapter（worker 进程，YOLO + 512D）"),
+            ("🎯 Fursee 匹配阈值", "cosine threshold = 0.79"),
+            ("📐 Euclidean eps", "eps = 0.6481（min_samples=1, metric=euclidean）"),
+            ("🗂 MD5 去重", "启用（path + MD5 内容级去重）"),
+            ("🗄 数据库 schema", "点击「刷新」加载"),
+            ("🖼 身份数据", "点击「刷新」加载"),
+            ("⭐ 收藏", "点击「刷新」加载"),
+            ("📦 项目版本", "AIPhotoManager V4（UI Phase 3）"),
+        ]
+        self._settings_rows = []
+        for k, v in placeholder:
+            lab = kv(f"{k}\n{v}")
+            layout.addWidget(lab)
+            self._settings_rows.append((k, lab))
+
+        refresh_btn = QPushButton("🔄 刷新状态")
+        refresh_btn.setStyleSheet(
+            "QPushButton{background:#3498db;color:white;border:none;"
+            "padding:8px 18px;border-radius:6px;font-size:13px;font-weight:bold;}"
+            "QPushButton:hover{background:#2980b9;}"
+        )
+        refresh_btn.clicked.connect(self._refresh_settings_page)
+        layout.addWidget(refresh_btn, alignment=Qt.AlignLeft)
+
+        layout.addStretch()
+        return page
+
+    def _refresh_settings_page(self):
+        """切到设置页 / 点击刷新时，读取真实数据库状态（只读）。"""
+        try:
+            from core.identity import IdentityManager
+            mgr = IdentityManager()
+            try:
+                schema_v = mgr.db.conn.execute(
+                    "PRAGMA user_version"
+                ).fetchone()[0]
+                n_img = mgr.db.conn.execute(
+                    "SELECT COUNT(*) FROM identity_image"
+                ).fetchone()[0]
+                n_grp = mgr.db.conn.execute(
+                    "SELECT COUNT(*) FROM identity_group"
+                ).fetchone()[0]
+                n_fav = len(mgr.db.list_favorites() or [])
+                has_fav_tbl = mgr.db.conn.execute(
+                    "SELECT 1 FROM sqlite_master WHERE type='table' "
+                    "AND name='favorite_image'"
+                ).fetchone() is not None
+            finally:
+                mgr.close()
+        except Exception as e:
+            print(f"[设置] 状态读取失败: {e}")
+            schema_v = n_img = n_grp = n_fav = "—"
+            has_fav_tbl = False
+
+        values = {
+            "🗄 数据库 schema": f"user_version = {schema_v}"
+            + ("（含收藏表）" if has_fav_tbl else ""),
+            "🖼 身份数据": f"identity_image {n_img} 行 / identity_group {n_grp} 组",
+            "⭐ 收藏": f"{n_fav} 张",
+        }
+        for key, lab in self._settings_rows:
+            if key in values:
+                lab.setText(f"{key}\n{values[key]}")
+
+    # ------------------------------------------------------------
+    # 收藏页（UI Phase 3-1，照片级收藏）
+    # ------------------------------------------------------------
+
+    def _build_favorites_page(self):
+        """收藏页：展示已收藏的唯一照片，点击打开完整原图。"""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(36, 30, 36, 30)
+        layout.setSpacing(16)
+
+        title = QLabel("⭐ 收藏")
+        title.setStyleSheet("font-size:22px;font-weight:bold;color:#2c3e50;")
+        layout.addWidget(title)
+
+        stats = QLabel("")
+        stats.setStyleSheet("font-size:13px;color:#7f8c8d;")
+        layout.addWidget(stats)
+        self._fav_stats_label = stats
+
+        refresh_btn = QPushButton("🔄 刷新")
+        refresh_btn.setStyleSheet(
+            "QPushButton{background:#3498db;color:white;border:none;"
+            "padding:6px 16px;border-radius:4px;font-size:12px;}"
+            "QPushButton:hover{background:#2980b9;}"
+        )
+        refresh_btn.clicked.connect(self._load_favorites_page)
+        layout.addWidget(refresh_btn, alignment=Qt.AlignLeft)
+
+        grid_container = QWidget()
+        self._fav_grid_layout = QGridLayout(grid_container)
+        self._fav_grid_layout.setSpacing(10)
+        self._fav_grid_layout.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self._fav_grid_layout.setContentsMargins(0, 0, 0, 0)
+
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setWidget(grid_container)
+        scroll.setStyleSheet("QScrollArea{border:none;background:transparent;}")
+        layout.addWidget(scroll, 1)
+
+        self._fav_paths = []          # 当前页收藏 path 列表
+        self._fav_tile_map = {}       # widget → path
+        return page
+
+    def _load_favorites_page(self):
+        """从数据库读取收藏并渲染照片网格（唯一照片）。"""
+        from core.identity import IdentityManager
+        mgr = IdentityManager()
+        try:
+            paths = mgr.db.list_favorites() or []
+        finally:
+            mgr.close()
+        self._fav_paths = paths
+        self._fav_stats_label.setText(f"共 {len(paths)} 张收藏照片")
+
+        self._clear_grid(self._fav_grid_layout)
+        for tile in list(self._fav_tile_map.keys()):
+            self._fav_tile_map.pop(tile, None)
+
+        if not paths:
+            empty = QLabel("暂无收藏。在照片页点击「⭐ 收藏当前」添加。")
+            empty.setStyleSheet("font-size:14px;color:#95a5a6;padding:30px;")
+            self._fav_grid_layout.addWidget(empty, 0, 0)
+            return
+
+        cols = 6
+        for idx, path in enumerate(paths):
+            tile = self._render_favorite_tile(path)
+            r, c = divmod(idx, cols)
+            self._fav_grid_layout.addWidget(tile, r, c)
+
+    def _render_favorite_tile(self, path):
+        """单个收藏缩略图（完整原图缩略；点击预览原图；右键取消收藏）。"""
+        tile = QFrame()
+        tile.setFixedSize(150, 150)
+        tile.setStyleSheet(
+            "QFrame{background:#f0f2f5;border-radius:4px;border:1px solid #e1e4e8;}"
+            "QFrame:hover{border:1px solid #e74c3c;}"
+        )
+        tile.setCursor(Qt.PointingHandCursor)
+        tile.setContextMenuPolicy(Qt.CustomContextMenu)
+        tile_layout = QVBoxLayout(tile)
+        tile_layout.setContentsMargins(5, 5, 5, 5)
+
+        label = QLabel()
+        label.setAlignment(Qt.AlignCenter)
+        label.setFixedSize(138, 138)
+        label.setStyleSheet("background:transparent;border:none;")
+        resolved = self._resolve_display_path(path)
+        pix = self._load_pixmap_cached(resolved, QSize(138, 138))[0]
+        if not pix.isNull():
+            label.setPixmap(
+                pix.scaled(138, 138, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            )
+        else:
+            label.setText("无图")
+            label.setStyleSheet(
+                "background:transparent;border:none;color:#bdc3c7;font-size:10px;"
+            )
+        tile_layout.addWidget(label)
+
+        for widget in (tile, label):
+            widget.installEventFilter(self)
+            self._fav_tile_map[widget] = path
+        tile.customContextMenuRequested.connect(
+            lambda _pos, p=path: self._remove_favorite(p)
+        )
+        return tile
+
+    def _toggle_favorite_current(self):
+        """收藏/取消收藏照片页当前预览的照片（image_path 级）。"""
+        from core.identity import IdentityManager
+        path = self._photo_detection_context.get("path") if self._photo_detection_context else None
+        if not path:
+            QMessageBox.information(self, "提示", "请先在照片页打开一张照片。")
+            return
+        # 收藏键用库内绝对路径（还原 backslash → 与 identity_image 一致）
+        raw = path.replace("\\", "/")
+        mgr = IdentityManager()
+        try:
+            if mgr.db.is_favorite(raw):
+                mgr.db.remove_favorite(raw)
+                msg = "已取消收藏"
+            else:
+                mgr.db.add_favorite(raw)
+                msg = "已收藏"
+        finally:
+            mgr.close()
+        self.statusBar().showMessage(f"{msg}：{os.path.basename(raw)}", 3000)
+
+    def _remove_favorite(self, path):
+        from core.identity import IdentityManager
+        mgr = IdentityManager()
+        try:
+            mgr.db.remove_favorite(path)
+        finally:
+            mgr.close()
+        self._load_favorites_page()
+
+    # ------------------------------------------------------------
+    # 待处理页（添加新照片 → 自动识别 → 兽装 Fursee / 人物 Face）
+    # ------------------------------------------------------------
+
+    def _build_pending_page(self):
+        """构建「待处理」页：添加照片/文件夹 → 一键分析（增量链路）。
+
+        入口：选单张/多张照片或整个文件夹 → 检查重复（path+MD5）→
+        仅分析真正的新照片 → L1 路由（兽装→Fursee / 人物→Face /
+        其他跳过）→ incremental_assign → 后台线程不阻塞 GUI → 摘要
+        提示 → 自动刷新各页。
+        """
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(36, 30, 36, 30)
+        layout.setSpacing(16)
+
+        title = QLabel("待处理 · 添加新照片")
+        title.setStyleSheet("font-size:22px;font-weight:bold;color:#2c3e50;")
+        layout.addWidget(title)
+
+        desc = QLabel(
+            "选择照片或文件夹后点击「分析新照片」。\n"
+            "兽装 → Fursee 识别；人物 → 人脸识别；其他自动跳过。\n"
+            "已存在 / 内容重复的照片会自动跳过（不删除文件）。"
+        )
+        desc.setStyleSheet("font-size:12px;color:#7f8c8d;")
+        desc.setWordWrap(True)
+        layout.addWidget(desc)
+
+        # 统计区：新照片/未分析/失败/重复（Phase 3-2）
+        self._pending_stats_label = QLabel("点击「扫描新照片」查看待处理统计")
+        self._pending_stats_label.setStyleSheet(
+            "font-size:13px;color:#34495e;background:#f8f9fa;"
+            "border:1px solid #e0e0e0;border-radius:6px;padding:10px;"
+        )
+        self._pending_stats_label.setWordWrap(True)
+        layout.addWidget(self._pending_stats_label)
+
+        # 按钮行
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+
+        add_files_btn = QPushButton("📁 添加照片")
+        add_files_btn.setStyleSheet(
+            "QPushButton{background:#27ae60;color:white;border:none;"
+            "padding:8px 16px;border-radius:6px;font-size:13px;font-weight:bold;}"
+            "QPushButton:hover{background:#229954;}"
+        )
+        add_files_btn.clicked.connect(self._pick_photos_to_add)
+        btn_row.addWidget(add_files_btn)
+
+        add_folder_btn = QPushButton("📂 添加文件夹")
+        add_folder_btn.setStyleSheet(
+            "QPushButton{background:#3498db;color:white;border:none;"
+            "padding:8px 16px;border-radius:6px;font-size:13px;font-weight:bold;}"
+            "QPushButton:hover{background:#2980b9;}"
+        )
+        add_folder_btn.clicked.connect(self._pick_folder_to_add)
+        btn_row.addWidget(add_folder_btn)
+
+        scan_btn = QPushButton("📡 扫描新照片")
+        scan_btn.setStyleSheet(
+            "QPushButton{background:#8e44ad;color:white;border:none;"
+            "padding:8px 16px;border-radius:6px;font-size:13px;font-weight:bold;}"
+            "QPushButton:hover{background:#7d3c98;}"
+        )
+        scan_btn.clicked.connect(self._scan_photos_dir)
+        btn_row.addWidget(scan_btn)
+
+        analyze_btn = QPushButton("▶️  分析新照片")
+        analyze_btn.setStyleSheet(
+            "QPushButton{background:#e67e22;color:white;border:none;"
+            "padding:8px 20px;border-radius:6px;font-size:13px;font-weight:bold;}"
+            "QPushButton:hover{background:#d35400;}"
+            "QPushButton:disabled{background:#bdc3c7;}"
+        )
+        analyze_btn.clicked.connect(self._start_analyze_selected)
+        self._pending_analyze_btn = analyze_btn
+        btn_row.addWidget(analyze_btn)
+
+        btn_row.addStretch()
+        layout.addLayout(btn_row)
+
+        # 已选列表
+        list_label = QLabel("待分析文件：")
+        list_label.setStyleSheet("font-size:13px;color:#34495e;font-weight:bold;")
+        layout.addWidget(list_label)
+
+        self._pending_list = QListWidget()
+        self._pending_list.setMaximumHeight(180)
+        self._pending_list.setStyleSheet(
+            "QListWidget{background:#fff;border:1px solid #e0e0e0;"
+            "border-radius:6px;font-size:12px;}"
+        )
+        layout.addWidget(self._pending_list)
+
+        # 进度
+        self._pending_progress = QProgressBar()
+        self._pending_progress.setRange(0, 100)
+        self._pending_progress.setValue(0)
+        self._pending_progress.setTextVisible(True)
+        layout.addWidget(self._pending_progress)
+
+        self._pending_status = QLabel("就绪")
+        self._pending_status.setStyleSheet("font-size:12px;color:#566573;")
+        layout.addWidget(self._pending_status)
+
+        layout.addStretch()
+
+        # 状态：选中文件集合 + 后台 worker
+        self._pending_files = []       # 绝对路径列表（未去重展示）
+        self._pending_worker = None    # QThread
+
+        return page
+
+    def _pick_photos_to_add(self):
+        """QFileDialog 多选照片 → 加入待分析列表（不立即分析）。"""
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "选择要添加的照片",
+            "",
+            "图片文件 (*.jpg *.jpeg *.png *.webp)",
+        )
+        self._add_pending_files(files)
+
+    def _pick_folder_to_add(self):
+        """QFileDialog 选文件夹 → 加入其中全部图片。"""
+        folder = QFileDialog.getExistingDirectory(self, "选择包含照片的文件夹")
+        if not folder:
+            return
+        exts = {".jpg", ".jpeg", ".png", ".webp"}
+        try:
+            names = sorted(os.listdir(folder))
+        except OSError:
+            return
+        files = [
+            os.path.join(folder, n).replace("\\", "/")
+            for n in names
+            if os.path.splitext(n)[1].lower() in exts
+        ]
+        self._add_pending_files(files)
+
+    def _scan_photos_dir(self):
+        """扫描项目 photos/ 目录 → 全部图片加入待分析列表。
+
+        与「分析新照片」共用同一后台增量链路（analyze_paths）：
+        path/MD5/批内去重 → L1 路由（兽装 Fursee / 人物 Face / 其他跳过）
+        → incremental_assign → 完成自动刷新。
+        """
+        # 项目根 = 本文件上两级（ui/ 下）；photos 目录与生产库同目录。
+        photos_dir = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "photos")
+        )
+        if not os.path.isdir(photos_dir):
+            QMessageBox.warning(self, "提示", f"未找到照片目录：{photos_dir}")
+            return
+        exts = {".jpg", ".jpeg", ".png", ".webp"}
+        try:
+            names = sorted(os.listdir(photos_dir))
+        except OSError as e:
+            QMessageBox.warning(self, "扫描失败", f"无法读取照片目录：{e}")
+            return
+        files = [
+            os.path.join(photos_dir, n).replace("\\", "/")
+            for n in names
+            if os.path.splitext(n)[1].lower() in exts
+        ]
+        self._add_pending_files(files)
+        self._pending_status.setText(
+            f"已扫描 photos/：共 {len(files)} 张图片，"
+            f"其中 {len(self._pending_files)} 张待分析（重复将自动跳过）"
+        )
+        self._refresh_pending_stats()
+
+    def _refresh_pending_stats(self):
+        """统计 photos/ 待处理情况：总照片/未入库/重复/已入库。
+
+        只读统计（path + MD5），不触发分析；用于待处理页展示。
+        """
+        from core.identity import IdentityManager
+        mgr = IdentityManager()
+        try:
+            photos_dir = os.path.abspath(
+                os.path.join(os.path.dirname(__file__), "..", "photos")
+            )
+            existing = {
+                row[0] for row in mgr.db.conn.execute(
+                    "SELECT DISTINCT image_path FROM identity_image"
+                )
+            }
+            known_md5 = set()
+            import hashlib
+            for p in existing:
+                if os.path.exists(p):
+                    try:
+                        with open(p, "rb") as fh:
+                            known_md5.add(hashlib.md5(fh.read()).hexdigest())
+                    except OSError:
+                        pass
+            total = new_cnt = dup_cnt = 0
+            if os.path.isdir(photos_dir):
+                exts = {".jpg", ".jpeg", ".png", ".webp"}
+                for n in sorted(os.listdir(photos_dir)):
+                    if os.path.splitext(n)[1].lower() not in exts:
+                        continue
+                    total += 1
+                    p = os.path.join(photos_dir, n).replace("\\", "/")
+                    if p in existing:
+                        continue
+                    try:
+                        with open(p, "rb") as fh:
+                            m = hashlib.md5(fh.read()).hexdigest()
+                        if m in known_md5:
+                            dup_cnt += 1
+                            continue
+                    except OSError:
+                        pass
+                    new_cnt += 1
+        finally:
+            mgr.close()
+        self._pending_stats_label.setText(
+            f"photos/ 照片总数：{total}\n"
+            f"未分析（待处理）：{new_cnt} 张\n"
+            f"重复副本（将跳过）：{dup_cnt} 张\n"
+            f"已入库：{total - new_cnt - dup_cnt} 张"
+        )
+
+    def _add_pending_files(self, files):
+        """去重并入列（path 级）；刷新列表。"""
+        if not files:
+            return
+        existing = set(self._pending_files)
+        added = 0
+        for f in files:
+            p = str(f).replace("\\", "/")
+            if p not in existing:
+                existing.add(p)
+                self._pending_files.append(p)
+                added += 1
+        if added:
+            self._pending_list.clear()
+            for p in self._pending_files:
+                self._pending_list.addItem(QListWidgetItem(os.path.basename(p)))
+            self._pending_status.setText(
+                f"已选 {len(self._pending_files)} 张照片（分析时自动跳过重复）"
+            )
+
+    def _start_analyze_selected(self):
+        """后台线程执行 analyze_paths（不阻塞 GUI）；完成后刷新各页。"""
+        if self._pending_worker is not None and self._pending_worker.isRunning():
+            return
+        if not self._pending_files:
+            QMessageBox.information(self, "提示", "请先添加照片或文件夹。")
+            return
+        self._pending_analyze_btn.setEnabled(False)
+        self._pending_progress.setValue(0)
+        self._pending_status.setText("正在准备…")
+
+        worker = _AnalyzeWorker(self._pending_files)
+        worker.progress_updated.connect(self._on_analyze_progress)
+        worker.finished_ok.connect(self._on_analyze_done)
+        worker.failed.connect(self._on_analyze_failed)
+        self._pending_worker = worker
+        worker.start()
+
+    def _on_analyze_progress(self, current, total, status):
+        if total > 0:
+            self._pending_progress.setRange(0, total)
+            self._pending_progress.setValue(current)
+        self._pending_status.setText(f"({current}/{total}) {status}")
+
+    def _on_analyze_done(self, result):
+        self._pending_analyze_btn.setEnabled(True)
+        self._pending_progress.setValue(self._pending_progress.maximum())
+        self._pending_status.setText("分析完成")
+        # 清空已选列表
+        self._pending_files = []
+        self._pending_list.clear()
+        self._pending_worker = None
+        # 自动刷新各分组页 + 总览
+        for key in ("fursuit", "person", "character"):
+            if self._group_page_loaded.get(key):
+                self._load_groups_into_page(key)
+        if self._ui_ready:
+            self._refresh_overview()
+        # 摘要
+        self._show_analyze_summary(result)
+
+    def _on_analyze_failed(self, err):
+        self._pending_analyze_btn.setEnabled(True)
+        self._pending_worker = None
+        self._pending_status.setText("分析失败")
+        QMessageBox.critical(self, "分析失败", f"分析新照片时出错：{err}")
+
+    def _show_analyze_summary(self, r):
+        dup = r.get("dup_path", 0) + r.get("dup_md5", 0)
+        msg = (
+            f"新增照片：{r.get('new', 0)}\n"
+            f"  兽装：{r.get('fursuit', 0)}\n"
+            f"  人物：{r.get('person', 0)}\n"
+            f"  其他：{r.get('other', 0)}\n"
+            f"重复跳过：{dup}\n"
+            f"失败：{r.get('failed', 0)}\n\n"
+            f"新增兽装角色：{r.get('created_fursee', 0)}\n"
+            f"加入已有兽装角色：{r.get('joined_fursee', 0)}\n"
+            f"新增人物角色：{r.get('created_face', 0)}\n"
+            f"加入已有人物角色：{r.get('joined_face', 0)}\n\n"
+            "兽装页 / 人物页 / 角色页已刷新。"
+        )
+        QMessageBox.information(self, "分析完成", msg)
 
     # ------------------------------------------------------------
     # 占位页
@@ -769,6 +1339,40 @@ class MainWindow(QMainWindow):
                 seen.add(p)
                 out.append(p)
         return out
+
+    def _path_md5(self, path):
+        """计算照片内容 MD5（临时内存缓存，不落库）。
+
+        仅用于 UI 照片墙「唯一照片内容」去重；key=image_path,
+        value=md5 hex。读取失败返回 None（调用方按不参与 MD5 去重处理）。
+        """
+        if not path:
+            return None
+        cached = self._path_md5_cache.get(path)
+        if cached is not None:
+            return cached
+        import hashlib
+        try:
+            with open(path, "rb") as f:
+                m = hashlib.md5(f.read()).hexdigest()
+        except OSError:
+            m = None
+        self._path_md5_cache[path] = m
+        return m
+
+    def _unique_photo_count(self, group):
+        """组内「唯一照片内容」数量：同 path 多 detection = 1；
+        同 MD5 不同 path = 1。数据库 detection 数量完全不变。"""
+        seen_md5 = set()
+        count = 0
+        for path in self._dedup_paths(group.get("images", [])):
+            m = self._path_md5(path)
+            if m is not None:
+                if m in seen_md5:
+                    continue
+                seen_md5.add(m)
+            count += 1
+        return count
 
     # ---------- detection 级展示支持（Phase 2.5，只读查询，不改后端） ----------
     @staticmethod
@@ -1105,7 +1709,26 @@ class MainWindow(QMainWindow):
             return "Fursee"
         if types == ["fursuit_visual"]:
             return "Legacy"
+        if types == ["face"]:
+            return "Face"
         return " + ".join(sorted({t for t in types if t}))
+
+    @staticmethod
+    def _format_group_category(group):
+        """角色类别 + 识别模型，供卡片/详情显示（不暴露 embedding 等参数）。
+
+        返回 "兽装角色 · Fursee" / "人物角色 · Face" / ""。
+        """
+        types = group.get("source_types") or []
+        if types == ["fursuit_fursee"]:
+            return "兽装角色 · Fursee"
+        if types == ["face"]:
+            return "人物角色 · Face"
+        if "fursuit_fursee" in types:
+            return "兽装角色 · Fursee"
+        if "face" in types:
+            return "人物角色 · Face"
+        return ""
 
     def _clear_grid(self, grid_layout):
         """清空 QGridLayout 内全部 widget。"""
@@ -1185,7 +1808,7 @@ class MainWindow(QMainWindow):
         state["_has_data"] = True
         state["empty_label"].hide()
 
-        total_photos = sum(len(self._dedup_paths(g.get("images", []))) for g in groups)
+        total_photos = sum(self._unique_photo_count(g) for g in groups)
         state["stats_label"].setText(
             f"共 {len(groups)} 个角色组 · {total_photos} 张照片"
         )
@@ -1291,12 +1914,20 @@ class MainWindow(QMainWindow):
         name_label.setWordWrap(True)
         layout.addWidget(name_label)
 
+        category_text = self._format_group_category(group)
+        if category_text:
+            category_label = QLabel(category_text)
+            category_label.setStyleSheet(
+                "font-size:11px;color:#8e44ad;font-weight:bold;"
+            )
+            layout.addWidget(category_label)
+
         source_label = QLabel(self._format_source_types(group))
         source_label.setStyleSheet("font-size:11px;color:#7f8c8d;")
         if source_label.text():
             layout.addWidget(source_label)
 
-        count = len(self._dedup_paths(group.get("images", [])))
+        count = self._unique_photo_count(group)
         count_label = QLabel(f"{count} 张照片")
         count_label.setStyleSheet("font-size:12px;color:#7f8c8d;")
         layout.addWidget(count_label)
@@ -1319,42 +1950,88 @@ class MainWindow(QMainWindow):
                 page_key, group, image_path, detection_index = self._tile_path_map[obj]
                 self._open_photo_in_photo_page(group, image_path, detection_index)
                 return True
+            if obj in self._fav_tile_map:
+                path = self._fav_tile_map[obj]
+                self._preview_favorite(path)
+                return True
         return super().eventFilter(obj, event)
+
+    def _preview_favorite(self, path):
+        """收藏页点击 → 照片页预览完整原图（复用现有预览链路）。"""
+        resolved = self._resolve_display_path(path)
+        self.image_list = [resolved]
+        self.image_list_widget.clear()
+        item = QListWidgetItem(os.path.basename(path))
+        pix = QPixmap(resolved)
+        if not pix.isNull():
+            item.setIcon(
+                QIcon(pix.scaled(110, 110, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            )
+        self.image_list_widget.addItem(item)
+        self._photo_detection_context = {
+            "row": 0, "path": resolved, "bbox": None,
+            "detection_index": None, "group_name": "收藏",
+        }
+        self.nav_list.setCurrentRow(1)
+        self.image_list_widget.setCurrentRow(0)
+        self.show_preview(0)
 
     def _open_group(self, page_key, group, display_name):
         """点击组卡片 → 切到组内照片墙。
 
-        照片墙成员 = 该组的 detection 级成员（(path, detection_index)
-        复合键），同 path 不同 detection 是不同主体，各自一格显示
-        对应 bbox 裁剪；bbox 无效回退完整原图。
+        照片墙显示单位 =「唯一照片内容」：
+        ① 同一 image_path 多 detection → 只显示 1 格，取当前组内该
+           image_path 的 detection 中 confidence 最高者做 bbox crop；
+        ② 不同 image_path 但 MD5 内容相同 → 只显示 1 格（局部 seen_md5，
+           每次 _open_group 新建，跨角色组不共享去重）；
+        ③ bbox 无效回退完整原图；点击仍打开完整原图。
+        数据库 detection 数据完全不变。
         """
         state = self._group_pages.get(page_key)
         if state is None:
             return
         det_map = self._fetch_group_detections(group)
-        # 复合键去重保序：相同 (path, det_idx) 去重；同 path 不同 det_idx 保留。
-        # det_map 为空（查询失败/异常兜底）→ 回退 path 级显示（完整原图）。
-        seen = set()
+        # 第一层：按 image_path 聚合 → 组内每个 path 选 confidence 最高的 det
+        # （保持 group["images"] 顺序）。
+        best_det_by_path = {}
+        for det in (group.get("detections") or []):
+            if not det or not det.get("image_path"):
+                continue
+            p = det["image_path"]
+            cur = best_det_by_path.get(p)
+            if cur is None or float(det.get("confidence") or 0.0) > float(cur.get("confidence") or 0.0):
+                best_det_by_path[p] = det
+        # 第二层：MD5 内容去重（局部集合，跨组不共享）。
+        seen_md5 = set()
         members = []
-        if det_map:
-            for key in sorted(det_map.keys(), key=lambda k: (k[0] or "", k[1] or 0)):
-                if key in seen or key[0] is None:
+        for path in self._dedup_paths(group.get("images", [])):
+            m = self._path_md5(path)
+            if m is not None:
+                if m in seen_md5:
                     continue
-                seen.add(key)
+                seen_md5.add(m)
+            det = best_det_by_path.get(path)
+            det_idx = int(det.get("detection_index") or 0) if det else 0
+            members.append((path, det_idx))
+        # 兜底：无 images（legacy 异常数据）但 det_map 有 → 按 det 键保序。
+        if not members and det_map:
+            for key in sorted(det_map.keys(), key=lambda k: (k[0] or "", k[1] or 0)):
+                if key[0] is None:
+                    continue
                 members.append(key)
-        else:
-            for path in self._dedup_paths(group.get("images", [])):
-                members.append((path, 0))
         state["current_group"] = group
         state["current_display_name"] = display_name
         state["current_members"] = members
         state["current_det_map"] = det_map
 
         state["wall_title"].setText(f"🐾  {display_name}")
-        unique_photo_count = len({path for path, _ in members})
-        state["wall_count"].setText(
-            f"{len(members)} 个 detection · {unique_photo_count} 张原图"
-        )
+        category_text = self._format_group_category(group)
+        if category_text:
+            state["wall_count"].setText(
+                f"{category_text} · {len(members)} 张照片"
+            )
+        else:
+            state["wall_count"].setText(f"{len(members)} 张照片")
 
         self._clear_grid(state["wall_grid_layout"])
         for tile in list(self._tile_path_map.keys()):
@@ -1526,7 +2203,7 @@ class MainWindow(QMainWindow):
                 group, idx, state.get("default_prefix", "角色")
             )
             item = QListWidgetItem(
-                f"{display_name} · {len(self._dedup_paths(group.get('images', [])))} 张照片"
+                f"{display_name} · {self._unique_photo_count(group)} 张照片"
             )
             item.setData(Qt.UserRole, group.get("character_id"))
             group_list.addItem(item)
@@ -1638,6 +2315,12 @@ class MainWindow(QMainWindow):
             if key and not self._group_page_loaded.get(key, False):
                 self._load_groups_into_page(key)
                 self._group_page_loaded[key] = True
+            # Phase 3-1：收藏页（row 5）懒加载收藏列表
+            if row == 5:
+                self._load_favorites_page()
+            # Phase 3-3：设置页（row 7）懒刷新状态
+            if row == 7:
+                self._refresh_settings_page()
 
     # ------------------------------------------------------------
     # 总览数据
@@ -1669,12 +2352,21 @@ class MainWindow(QMainWindow):
             val = stats.get(stat_key, "—")
             label.setText(str(val))
 
-        # 收藏：后端无 favorites 表，如实标注
+        # 收藏：真实计数（favorite_image 表）
         fav_label = self._stat_value_labels.get("favorites")
         if fav_label is not None:
-            fav_label.setText("未实现")
+            try:
+                from core.identity import IdentityManager
+                mgr = IdentityManager()
+                try:
+                    n_fav = len(mgr.db.list_favorites() or [])
+                finally:
+                    mgr.close()
+            except Exception:
+                n_fav = 0
+            fav_label.setText(str(n_fav))
             fav_label.setStyleSheet(
-                "font-size:18px;font-weight:bold;color:#bdc3c7;"
+                "font-size:18px;font-weight:bold;color:#e74c3c;"
             )
 
         # 待处理摘要
@@ -2644,3 +3336,35 @@ if __name__ == "__main__":
     sys.exit(
         app.exec()
     )
+
+
+class _AnalyzeWorker(QThread):
+    """后台执行 IdentityManager.analyze_paths，避免阻塞 GUI。
+
+    信号：
+        progress_updated(current, total, status) 逐张进度
+        finished_ok(result_dict)                成功
+        failed(err_str)                         异常
+    """
+
+    progress_updated = Signal(int, int, str)
+    finished_ok = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, paths, parent=None):
+        super().__init__(parent)
+        self._paths = list(paths or [])
+
+    def run(self):
+        from core.identity import IdentityManager
+        mgr = IdentityManager()
+        try:
+            result = mgr.analyze_paths(
+                self._paths,
+                progress_callback=lambda i, t, s: self.progress_updated.emit(i, t, s),
+            )
+            self.finished_ok.emit(result)
+        except Exception as e:
+            self.failed.emit(str(e))
+        finally:
+            mgr.close()
