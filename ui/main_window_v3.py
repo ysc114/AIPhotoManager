@@ -9,17 +9,21 @@ _project_root = Path(__file__).resolve().parents[1]
 if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
+from config.settings_manager import settings as S
+from ui.settings_center import SettingsCenterPage
 
-from PySide6.QtCore import Qt, QSize, QTimer, QEvent, QRect, QThread, Signal
+
+from PySide6.QtCore import Qt, QSize, QTimer, QEvent, QRect, QThread, Signal, QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import (
     QIcon,
     QPixmap,
-    QFont,
     QPainter,
     QColor,
     QPen,
     QImageReader,
     QImageIOHandler,
+    QLinearGradient,
+    QBrush,
 )
 from PySide6.QtWidgets import (
     QApplication,
@@ -38,11 +42,12 @@ from PySide6.QtWidgets import (
     QProgressBar,
     QFrame,
     QScrollArea,
-    QSizePolicy,
     QComboBox,
     QDialog,
     QDialogButtonBox,
     QAbstractItemView,
+    QGraphicsDropShadowEffect,
+    QGraphicsOpacityEffect,
     QSplitter,
     QStackedWidget,
     QGridLayout,
@@ -162,16 +167,19 @@ class MainWindow(QMainWindow):
             central
         )
 
-        root = QHBoxLayout(central)
-        root.setContentsMargins(0, 0, 0, 0)
-        root.setSpacing(0)
+        # ── Liquid Glass：主窗口柔和渐变背景（视觉模拟毛玻璃）──
+        self._gradient_background(central)
 
-        # ---- 左侧导航栏 ----
+        root = QHBoxLayout(central)
+        root.setContentsMargins(16, 16, 16, 16)
+        root.setSpacing(16)
+
+        # ---- 左侧悬浮玻璃导航栏 ----
         self._build_nav(root)
 
-        # ---- 右侧内容区（堆栈） ----
+        # ---- 右侧内容区（堆栈，透明以露出渐变背景） ----
         self.content_stack = QStackedWidget()
-        self.content_stack.setStyleSheet("background:#f5f6fa;")
+        self.content_stack.setStyleSheet("background:transparent;")
 
         # 页 0：总览
         self.overview_page = self._build_overview_page()
@@ -218,6 +226,187 @@ class MainWindow(QMainWindow):
             "程序启动完成"
         )
 
+        # 按设置应用主题（新版/经典版 + Liquid Glass + 深浅色）
+        self._apply_theme()
+
+    # ------------------------------------------------------------
+    # Liquid Glass 主题（视觉模拟：渐变 + 半透明 + 高光 + 阴影 + 圆角）
+    # ------------------------------------------------------------
+
+    def _gradient_background(self, widget):
+        """柔和渐变背景（按主题：浅色 / 深色）。"""
+        theme = S.get("ui.theme", "system")
+        dark = theme == "dark"
+        h = widget.height() if widget.height() > 100 else 900
+        grad = QLinearGradient(0, 0, 0, h)
+        if dark:
+            grad.setColorAt(0.0, QColor("#232a36"))
+            grad.setColorAt(0.5, QColor("#262330"))
+            grad.setColorAt(1.0, QColor("#1e2830"))
+        else:
+            grad.setColorAt(0.0, QColor("#eef4fc"))
+            grad.setColorAt(0.5, QColor("#f3f0fa"))
+            grad.setColorAt(1.0, QColor("#e8f0f5"))
+        pal = widget.palette()
+        pal.setBrush(widget.backgroundRole(), QBrush(grad))
+        widget.setPalette(pal)
+        widget.setAutoFillBackground(True)
+
+    @staticmethod
+    def _glass_shadow(widget, blur=28, dy=6, alpha=60):
+        """为玻璃面板添加柔和投影。"""
+        effect = QGraphicsDropShadowEffect(widget)
+        effect.setBlurRadius(blur)
+        effect.setOffset(0, dy)
+        effect.setColor(QColor(30, 60, 110, alpha))
+        widget.setGraphicsEffect(effect)
+
+    def _apply_theme(self):
+        """根据设置应用全局主题（界面模式 + Liquid Glass + 深浅色）。
+
+        纯视觉切换：不改变任何数据库 / AI / 角色数据。
+        """
+        mode = S.get("ui.mode", "new")
+        lg = bool(S.get("ui.liquid_glass", True))
+        dark = S.get("ui.theme", "system") == "dark"
+
+        # 内容区背景：经典版或关闭液态玻璃 → 传统浅灰（深色主题→深灰）
+        if mode == "classic" or not lg:
+            if dark:
+                self.content_stack.setStyleSheet("background:#232a36;")
+            else:
+                self.content_stack.setStyleSheet("background:#f5f6fa;")
+        else:
+            self.content_stack.setStyleSheet("background:transparent;")
+
+        # 导航栏样式
+        self._apply_nav_theme()
+
+        # 全局 QSS
+        if mode == "classic":
+            qss = self._classic_qss(dark)
+        else:
+            qss = self._liquid_qss(dark, lg)
+        self.setStyleSheet(qss)
+
+        # 重绘背景渐变
+        central = self.centralWidget()
+        if central is not None:
+            self._gradient_background(central)
+
+    @staticmethod
+    def _liquid_qss(dark, lg):
+        """新版界面全局 QSS（Liquid Glass）。"""
+        text = "#cfd8e3" if dark else "#2c3e50"
+        return f"""
+            QMainWindow {{ background: transparent; }}
+            QWidget {{
+                font-family: "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei";
+                font-size: 13px;
+                color: {text};
+            }}
+            QToolTip {{
+                background: rgba(30,40,60,0.92);
+                color: #e8eef6;
+                border: 1px solid rgba(120,150,190,0.4);
+                border-radius: 6px;
+                padding: 4px 8px;
+            }}
+            QScrollBar:vertical {{
+                background: transparent; width: 9px; margin: 2px;
+            }}
+            QScrollBar::handle:vertical {{
+                background: rgba(120,140,170,0.35);
+                border-radius: 4px; min-height: 30px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background: rgba(120,140,170,0.55);
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0;
+            }}
+            QScrollBar:horizontal {{
+                background: transparent; height: 9px; margin: 2px;
+            }}
+            QScrollBar::handle:horizontal {{
+                background: rgba(120,140,170,0.35);
+                border-radius: 4px; min-width: 30px;
+            }}
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
+                width: 0;
+            }}
+            QProgressBar {{
+                background: rgba(255,255,255,0.6);
+                border: none;
+                border-radius: 7px;
+                min-height: 14px;
+                text-align: center;
+                color: #2c3e50;
+                font-size: 11px;
+            }}
+            QProgressBar::chunk {{
+                border-radius: 7px;
+                background: qlineargradient(
+                    x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #6fb7f5, stop:1 #9b8cf0
+                );
+            }}
+            QStatusBar {{
+                background: transparent;
+                color: {text};
+                border-top: 1px solid rgba(160,180,210,0.25);
+            }}
+        """
+
+    @staticmethod
+    def _classic_qss(dark):
+        """经典版界面全局 QSS（传统配色）。"""
+        return """
+            QMainWindow { background: #f5f6fa; }
+            QWidget {
+                font-family: "Microsoft YaHei UI", "Microsoft YaHei";
+                font-size: 13px;
+                color: #2c3e50;
+            }
+            QToolTip {
+                background: #ffffff;
+                color: #2c3e50;
+                border: 1px solid #d5dbdb;
+            }
+            QScrollBar:vertical {
+                background: #f0f2f5; width: 12px; margin: 0;
+            }
+            QScrollBar::handle:vertical {
+                background: #c8cfd8; border-radius: 5px; min-height: 30px;
+                margin: 2px;
+            }
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {
+                height: 0;
+            }
+            QScrollBar:horizontal {
+                background: #f0f2f5; height: 12px; margin: 0;
+            }
+            QScrollBar::handle:horizontal {
+                background: #c8cfd8; border-radius: 5px; min-width: 30px;
+                margin: 2px;
+            }
+            QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {
+                width: 0;
+            }
+            QProgressBar {
+                background: #ecf0f1; border: 1px solid #d5dbdb;
+                border-radius: 5px; min-height: 14px;
+                text-align: center; color: #2c3e50; font-size: 11px;
+            }
+            QProgressBar::chunk {
+                border-radius: 4px; background: #3498db;
+            }
+            QStatusBar {
+                background: #f5f6fa; color: #7f8c8d;
+                border-top: 1px solid #e0e4e8;
+            }
+        """
+
     # ------------------------------------------------------------
     # 导航栏
     # ------------------------------------------------------------
@@ -225,49 +414,29 @@ class MainWindow(QMainWindow):
     def _build_nav(self, parent_layout):
 
         nav = QWidget()
-        nav.setFixedWidth(190)
-        nav.setStyleSheet("background:#2c3e50;")
-
+        nav.setFixedWidth(196)
+        # 样式由 _apply_nav_theme() 按界面模式（新版/经典版）设置
+        self.nav = nav
         nav_layout = QVBoxLayout(nav)
-        nav_layout.setContentsMargins(0, 18, 0, 0)
+        nav_layout.setContentsMargins(14, 22, 14, 16)
         nav_layout.setSpacing(0)
 
         brand = QLabel("AIPhotoManager")
         brand.setStyleSheet(
-            "color:#ffffff;font-size:16px;font-weight:bold;"
-            "padding:0 18px 2px 18px;"
+            "color:#1f2d3d;font-size:17px;font-weight:800;"
+            "padding:0 8px 2px 8px;background:transparent;border:none;"
         )
         nav_layout.addWidget(brand)
 
         subtitle = QLabel("本地 AI 照片管理")
         subtitle.setStyleSheet(
-            "color:#95a5a6;font-size:11px;padding:0 18px 18px 18px;"
+            "color:#8a97a8;font-size:11px;padding:0 8px 18px 8px;"
+            "background:transparent;border:none;"
         )
         nav_layout.addWidget(subtitle)
 
         self.nav_list = QListWidget()
-        self.nav_list.setStyleSheet("""
-            QListWidget {
-                background: #2c3e50;
-                border: none;
-                outline: none;
-            }
-            QListWidget::item {
-                color: #ecf0f1;
-                padding: 13px 18px;
-                font-size: 14px;
-                border-left: 3px solid transparent;
-            }
-            QListWidget::item:selected {
-                background: #34495e;
-                border-left: 3px solid #3498db;
-                color: #ffffff;
-            }
-            QListWidget::item:hover {
-                background: #3a546b;
-            }
-        """)
-        self.nav_list.setFixedWidth(190)
+        self.nav_list.setFixedWidth(168)
 
         for item_text in self.NAV_ITEMS:
             self.nav_list.addItem(
@@ -279,6 +448,78 @@ class MainWindow(QMainWindow):
 
         parent_layout.addWidget(nav)
 
+        self._apply_nav_theme()
+
+    def _apply_nav_theme(self):
+        """按界面模式（新版/经典版）应用导航栏视觉。"""
+        mode = S.get("ui.mode", "new")
+        if mode == "classic":
+            # ── 经典版：深色传统侧栏 ──
+            self.nav.setStyleSheet(
+                "QWidget{background:#2c3e50;border:none;border-radius:16px;}"
+            )
+            self.nav_list.setStyleSheet("""
+                QListWidget {
+                    background: #2c3e50;
+                    border: none;
+                    outline: none;
+                }
+                QListWidget::item {
+                    color: #ecf0f1;
+                    padding: 13px 18px;
+                    font-size: 14px;
+                    border-left: 3px solid transparent;
+                }
+                QListWidget::item:selected {
+                    background: #34495e;
+                    border-left: 3px solid #3498db;
+                    color: #ffffff;
+                }
+                QListWidget::item:hover {
+                    background: #3a546b;
+                }
+            """)
+            self.nav.setGraphicsEffect(None)
+        else:
+            # ── 新版：悬浮玻璃侧栏 ──
+            self.nav.setStyleSheet("""
+                QWidget {
+                    background: rgba(255,255,255,0.55);
+                    border: 1px solid rgba(255,255,255,0.7);
+                    border-radius: 20px;
+                }
+            """)
+            self.nav_list.setStyleSheet("""
+                QListWidget {
+                    background: transparent;
+                    border: none;
+                    outline: none;
+                    padding: 4px 2px;
+                }
+                QListWidget::item {
+                    color: #4a5a6a;
+                    padding: 11px 14px;
+                    margin: 3px 2px;
+                    font-size: 13.5px;
+                    border-radius: 12px;
+                    background: transparent;
+                }
+                QListWidget::item:selected {
+                    background: qlineargradient(
+                        x1:0, y1:0, x2:1, y2:1,
+                        stop:0 rgba(120,180,255,0.45),
+                        stop:1 rgba(160,140,255,0.40)
+                    );
+                    color: #1f2d3d;
+                    font-weight: 600;
+                    border: 1px solid rgba(255,255,255,0.8);
+                }
+                QListWidget::item:hover:!selected {
+                    background: rgba(255,255,255,0.45);
+                }
+            """)
+            self._glass_shadow(self.nav, blur=30, dy=8, alpha=70)
+
     # ------------------------------------------------------------
     # 总览页
     # ------------------------------------------------------------
@@ -287,24 +528,25 @@ class MainWindow(QMainWindow):
 
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(36, 30, 36, 30)
-        layout.setSpacing(16)
+        layout.setContentsMargins(30, 26, 30, 26)
+        layout.setSpacing(14)
 
-        title = QLabel("欢迎回来")
+        title = QLabel("AIPhotoManager")
         title.setStyleSheet(
-            "font-size:26px;font-weight:bold;color:#2c3e50;"
+            "font-size:30px;font-weight:800;color:#1f2d3d;"
+            "letter-spacing:1px;background:transparent;border:none;"
         )
         layout.addWidget(title)
 
-        subtitle = QLabel("本地 AI 照片管理 · 总览")
+        subtitle = QLabel("欢迎回来 · 本地 AI 照片管理")
         subtitle.setStyleSheet(
-            "font-size:13px;color:#7f8c8d;"
+            "font-size:13px;color:#8a97a8;background:transparent;border:none;"
         )
         layout.addWidget(subtitle)
 
-        layout.addSpacing(8)
+        layout.addSpacing(10)
 
-        # 统计卡片网格 3x2
+        # 统计卡片网格 3x2（玻璃卡片）
         grid = QGridLayout()
         grid.setSpacing(14)
 
@@ -326,30 +568,41 @@ class MainWindow(QMainWindow):
 
         layout.addLayout(grid)
 
-        layout.addSpacing(10)
+        layout.addSpacing(8)
 
-        # 待处理摘要
+        # 待处理摘要（玻璃条）
         self._pending_label = QLabel("正在统计…")
         self._pending_label.setStyleSheet(
-            "font-size:13px;color:#555;background:#ffffff;"
-            "border:1px solid #e0e0e0;border-radius:8px;padding:14px;"
+            "font-size:13px;color:#5a6a7a;"
+            "background:rgba(255,255,255,0.55);"
+            "border:1px solid rgba(255,255,255,0.7);border-radius:14px;padding:14px 18px;"
         )
         self._pending_label.setWordWrap(True)
         layout.addWidget(self._pending_label)
 
         layout.addStretch()
 
-        # 刷新按钮
+        # 刷新按钮（胶囊）
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         self.btn_refresh_overview = QPushButton("🔄 刷新统计")
         self.btn_refresh_overview.setStyleSheet("""
             QPushButton {
-                font-size:13px;padding:8px 20px;
-                background:#3498db;color:white;border:none;
-                border-radius:6px;font-weight:bold;
+                font-size:13px;padding:9px 22px;
+                background:qlineargradient(
+                    x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #6fb7f5, stop:1 #9b8cf0
+                );
+                color:white;border:none;
+                border-radius:18px;font-weight:600;
             }
-            QPushButton:hover { background:#2980b9; }
+            QPushButton:hover {
+                background:qlineargradient(
+                    x1:0, y1:0, x2:1, y2:0,
+                    stop:0 #5cabe9, stop:1 #8a7ce6
+                );
+            }
+            QPushButton:pressed { padding:10px 22px 8px 22px; }
         """)
         btn_row.addWidget(self.btn_refresh_overview)
         layout.addLayout(btn_row)
@@ -361,27 +614,28 @@ class MainWindow(QMainWindow):
         card = QFrame()
         card.setStyleSheet("""
             QFrame {
-                background:#ffffff;
-                border:1px solid #e0e0e0;
-                border-radius:10px;
+                background: rgba(255,255,255,0.55);
+                border: 1px solid rgba(255,255,255,0.75);
+                border-radius: 18px;
             }
         """)
-        card.setMinimumSize(150, 110)
+        self._glass_shadow(card, blur=22, dy=4, alpha=40)
+        card.setMinimumSize(150, 108)
 
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(16, 16, 16, 16)
-        layout.setSpacing(6)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(4)
 
         value_label = QLabel("—")
         value_label.setStyleSheet(
-            "font-size:34px;font-weight:bold;color:#2c3e50;"
+            "font-size:32px;font-weight:700;color:#1f2d3d;background:transparent;border:none;"
         )
         value_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(value_label)
 
         title_label = QLabel(title_text)
         title_label.setStyleSheet(
-            "font-size:12px;color:#7f8c8d;"
+            "font-size:12px;color:#8a97a8;background:transparent;border:none;"
         )
         title_label.setAlignment(Qt.AlignCenter)
         layout.addWidget(title_label)
@@ -608,95 +862,18 @@ class MainWindow(QMainWindow):
     # ------------------------------------------------------------
 
     def _build_settings_page(self):
-        """设置页：只读展示 AI/数据库/版本信息（不提供修改入口）。"""
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        layout.setContentsMargins(36, 30, 36, 30)
-        layout.setSpacing(16)
+        """设置中心（完整控制台）：由独立模块 ui.settings_center 实现。
 
-        title = QLabel("⚙️ 设置")
-        title.setStyleSheet("font-size:22px;font-weight:bold;color:#2c3e50;")
-        layout.addWidget(title)
-
-        note = QLabel("只读信息页。AI 参数为定稿值，暂不支持修改。")
-        note.setStyleSheet("font-size:12px;color:#7f8c8d;")
-        layout.addWidget(note)
-
-        def kv(text, color="#2c3e50"):
-            lab = QLabel(text)
-            lab.setStyleSheet(
-                f"font-size:13px;color:{color};background:#f8f9fa;"
-                "border:1px solid #e0e0e0;border-radius:6px;padding:10px;"
-            )
-            lab.setWordWrap(True)
-            return lab
-
-        # 构造阶段不连库（避免 WAL 副作用）；切页时刷新实际状态
-        placeholder = [
-            ("🤖 L1 分类器", "CLIP（AIClassifier）"),
-            ("🐾 Fursee 兽装识别", "FurseeAdapter（worker 进程，YOLO + 512D）"),
-            ("🎯 Fursee 匹配阈值", "cosine threshold = 0.79"),
-            ("📐 Euclidean eps", "eps = 0.6481（min_samples=1, metric=euclidean）"),
-            ("🗂 MD5 去重", "启用（path + MD5 内容级去重）"),
-            ("🗄 数据库 schema", "点击「刷新」加载"),
-            ("🖼 身份数据", "点击「刷新」加载"),
-            ("⭐ 收藏", "点击「刷新」加载"),
-            ("📦 项目版本", "AIPhotoManager V4（UI Phase 3）"),
-        ]
-        self._settings_rows = []
-        for k, v in placeholder:
-            lab = kv(f"{k}\n{v}")
-            layout.addWidget(lab)
-            self._settings_rows.append((k, lab))
-
-        refresh_btn = QPushButton("🔄 刷新状态")
-        refresh_btn.setStyleSheet(
-            "QPushButton{background:#3498db;color:white;border:none;"
-            "padding:8px 18px;border-radius:6px;font-size:13px;font-weight:bold;}"
-            "QPushButton:hover{background:#2980b9;}"
-        )
-        refresh_btn.clicked.connect(self._refresh_settings_page)
-        layout.addWidget(refresh_btn, alignment=Qt.AlignLeft)
-
-        layout.addStretch()
-        return page
+        所有配置读写走 config.settings_manager.SettingsManager；
+        构造时不连库，切到设置页时由 _switch_page 触发 refresh()。
+        """
+        self.settings_center = SettingsCenterPage(win=self)
+        return self.settings_center
 
     def _refresh_settings_page(self):
-        """切到设置页 / 点击刷新时，读取真实数据库状态（只读）。"""
-        try:
-            from core.identity import IdentityManager
-            mgr = IdentityManager()
-            try:
-                schema_v = mgr.db.conn.execute(
-                    "PRAGMA user_version"
-                ).fetchone()[0]
-                n_img = mgr.db.conn.execute(
-                    "SELECT COUNT(*) FROM identity_image"
-                ).fetchone()[0]
-                n_grp = mgr.db.conn.execute(
-                    "SELECT COUNT(*) FROM identity_group"
-                ).fetchone()[0]
-                n_fav = len(mgr.db.list_favorites() or [])
-                has_fav_tbl = mgr.db.conn.execute(
-                    "SELECT 1 FROM sqlite_master WHERE type='table' "
-                    "AND name='favorite_image'"
-                ).fetchone() is not None
-            finally:
-                mgr.close()
-        except Exception as e:
-            print(f"[设置] 状态读取失败: {e}")
-            schema_v = n_img = n_grp = n_fav = "—"
-            has_fav_tbl = False
-
-        values = {
-            "🗄 数据库 schema": f"user_version = {schema_v}"
-            + ("（含收藏表）" if has_fav_tbl else ""),
-            "🖼 身份数据": f"identity_image {n_img} 行 / identity_group {n_grp} 组",
-            "⭐ 收藏": f"{n_fav} 张",
-        }
-        for key, lab in self._settings_rows:
-            if key in values:
-                lab.setText(f"{key}\n{values[key]}")
+        """兼容入口：切到设置页时刷新动态数据。"""
+        if hasattr(self, "settings_center"):
+            self.settings_center.refresh()
 
     # ------------------------------------------------------------
     # 收藏页（UI Phase 3-1，照片级收藏）
@@ -706,23 +883,27 @@ class MainWindow(QMainWindow):
         """收藏页：展示已收藏的唯一照片，点击打开完整原图。"""
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(36, 30, 36, 30)
+        layout.setContentsMargins(30, 26, 30, 26)
         layout.setSpacing(16)
 
         title = QLabel("⭐ 收藏")
-        title.setStyleSheet("font-size:22px;font-weight:bold;color:#2c3e50;")
+        title.setStyleSheet(
+            "font-size:24px;font-weight:800;color:#1f2d3d;"
+            "background:transparent;border:none;"
+        )
         layout.addWidget(title)
 
         stats = QLabel("")
-        stats.setStyleSheet("font-size:13px;color:#7f8c8d;")
+        stats.setStyleSheet("font-size:13px;color:#8a97a8;background:transparent;border:none;")
         layout.addWidget(stats)
         self._fav_stats_label = stats
 
         refresh_btn = QPushButton("🔄 刷新")
         refresh_btn.setStyleSheet(
-            "QPushButton{background:#3498db;color:white;border:none;"
-            "padding:6px 16px;border-radius:4px;font-size:12px;}"
-            "QPushButton:hover{background:#2980b9;}"
+            "QPushButton{background:rgba(255,255,255,0.6);color:#3a5a7a;"
+            "border:1px solid rgba(255,255,255,0.8);"
+            "padding:6px 18px;border-radius:15px;font-size:12px;font-weight:600;}"
+            "QPushButton:hover{background:rgba(255,255,255,0.9);}"
         )
         refresh_btn.clicked.connect(self._load_favorites_page)
         layout.addWidget(refresh_btn, alignment=Qt.AlignLeft)
@@ -773,15 +954,22 @@ class MainWindow(QMainWindow):
     def _render_favorite_tile(self, path):
         """单个收藏缩略图（完整原图缩略；点击预览原图；右键取消收藏）。"""
         tile = QFrame()
-        tile.setFixedSize(150, 150)
-        tile.setStyleSheet(
-            "QFrame{background:#f0f2f5;border-radius:4px;border:1px solid #e1e4e8;}"
-            "QFrame:hover{border:1px solid #e74c3c;}"
-        )
+        tile.setFixedSize(152, 152)
+        tile.setStyleSheet("""
+            QFrame {
+                background: rgba(255,255,255,0.55);
+                border-radius: 16px;
+                border: 1px solid rgba(255,255,255,0.8);
+            }
+            QFrame:hover {
+                background: rgba(255,255,255,0.9);
+                border: 1px solid rgba(240,130,150,0.6);
+            }
+        """)
         tile.setCursor(Qt.PointingHandCursor)
         tile.setContextMenuPolicy(Qt.CustomContextMenu)
         tile_layout = QVBoxLayout(tile)
-        tile_layout.setContentsMargins(5, 5, 5, 5)
+        tile_layout.setContentsMargins(6, 6, 6, 6)
 
         label = QLabel()
         label.setAlignment(Qt.AlignCenter)
@@ -852,11 +1040,14 @@ class MainWindow(QMainWindow):
         """
         page = QWidget()
         layout = QVBoxLayout(page)
-        layout.setContentsMargins(36, 30, 36, 30)
+        layout.setContentsMargins(30, 26, 30, 26)
         layout.setSpacing(16)
 
         title = QLabel("待处理 · 添加新照片")
-        title.setStyleSheet("font-size:22px;font-weight:bold;color:#2c3e50;")
+        title.setStyleSheet(
+            "font-size:24px;font-weight:800;color:#1f2d3d;"
+            "background:transparent;border:none;"
+        )
         layout.addWidget(title)
 
         desc = QLabel(
@@ -864,15 +1055,15 @@ class MainWindow(QMainWindow):
             "兽装 → Fursee 识别；人物 → 人脸识别；其他自动跳过。\n"
             "已存在 / 内容重复的照片会自动跳过（不删除文件）。"
         )
-        desc.setStyleSheet("font-size:12px;color:#7f8c8d;")
+        desc.setStyleSheet("font-size:12px;color:#8a97a8;background:transparent;border:none;")
         desc.setWordWrap(True)
         layout.addWidget(desc)
 
         # 统计区：新照片/未分析/失败/重复（Phase 3-2）
         self._pending_stats_label = QLabel("点击「扫描新照片」查看待处理统计")
         self._pending_stats_label.setStyleSheet(
-            "font-size:13px;color:#34495e;background:#f8f9fa;"
-            "border:1px solid #e0e0e0;border-radius:6px;padding:10px;"
+            "font-size:13px;color:#4a5a6a;background:rgba(255,255,255,0.55);"
+            "border:1px solid rgba(255,255,255,0.75);border-radius:14px;padding:12px 16px;"
         )
         self._pending_stats_label.setWordWrap(True)
         layout.addWidget(self._pending_stats_label)
@@ -883,37 +1074,45 @@ class MainWindow(QMainWindow):
 
         add_files_btn = QPushButton("📁 添加照片")
         add_files_btn.setStyleSheet(
-            "QPushButton{background:#27ae60;color:white;border:none;"
-            "padding:8px 16px;border-radius:6px;font-size:13px;font-weight:bold;}"
-            "QPushButton:hover{background:#229954;}"
+            "QPushButton{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #57c78a,stop:1 #6aaee8);color:white;border:none;"
+            "padding:9px 20px;border-radius:18px;font-size:13px;font-weight:600;}"
+            "QPushButton:hover{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #49b87c,stop:1 #5a9fd8);}"
         )
         add_files_btn.clicked.connect(self._pick_photos_to_add)
         btn_row.addWidget(add_files_btn)
 
         add_folder_btn = QPushButton("📂 添加文件夹")
         add_folder_btn.setStyleSheet(
-            "QPushButton{background:#3498db;color:white;border:none;"
-            "padding:8px 16px;border-radius:6px;font-size:13px;font-weight:bold;}"
-            "QPushButton:hover{background:#2980b9;}"
+            "QPushButton{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #6fb7f5,stop:1 #9b8cf0);color:white;border:none;"
+            "padding:9px 20px;border-radius:18px;font-size:13px;font-weight:600;}"
+            "QPushButton:hover{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #5cabe9,stop:1 #8a7ce6);}"
         )
         add_folder_btn.clicked.connect(self._pick_folder_to_add)
         btn_row.addWidget(add_folder_btn)
 
         scan_btn = QPushButton("📡 扫描新照片")
         scan_btn.setStyleSheet(
-            "QPushButton{background:#8e44ad;color:white;border:none;"
-            "padding:8px 16px;border-radius:6px;font-size:13px;font-weight:bold;}"
-            "QPushButton:hover{background:#7d3c98;}"
+            "QPushButton{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #c29ae8,stop:1 #9b8cf0);color:white;border:none;"
+            "padding:9px 20px;border-radius:18px;font-size:13px;font-weight:600;}"
+            "QPushButton:hover{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #b48ad8,stop:1 #8a7ce6);}"
         )
         scan_btn.clicked.connect(self._scan_photos_dir)
         btn_row.addWidget(scan_btn)
 
         analyze_btn = QPushButton("▶️  分析新照片")
         analyze_btn.setStyleSheet(
-            "QPushButton{background:#e67e22;color:white;border:none;"
-            "padding:8px 20px;border-radius:6px;font-size:13px;font-weight:bold;}"
-            "QPushButton:hover{background:#d35400;}"
-            "QPushButton:disabled{background:#bdc3c7;}"
+            "QPushButton{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #f0a35e,stop:1 #ef7f7f);color:white;border:none;"
+            "padding:9px 24px;border-radius:18px;font-size:13px;font-weight:600;}"
+            "QPushButton:hover{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #e8934e,stop:1 #e56e6e);}"
+            "QPushButton:disabled{background:rgba(180,190,200,0.6);color:#fff;}"
         )
         analyze_btn.clicked.connect(self._start_analyze_selected)
         self._pending_analyze_btn = analyze_btn
@@ -924,14 +1123,16 @@ class MainWindow(QMainWindow):
 
         # 已选列表
         list_label = QLabel("待分析文件：")
-        list_label.setStyleSheet("font-size:13px;color:#34495e;font-weight:bold;")
+        list_label.setStyleSheet("font-size:13px;color:#4a5a6a;font-weight:700;background:transparent;border:none;")
         layout.addWidget(list_label)
 
         self._pending_list = QListWidget()
         self._pending_list.setMaximumHeight(180)
         self._pending_list.setStyleSheet(
-            "QListWidget{background:#fff;border:1px solid #e0e0e0;"
-            "border-radius:6px;font-size:12px;}"
+            "QListWidget{background:rgba(255,255,255,0.6);border:1px solid rgba(255,255,255,0.8);"
+            "border-radius:14px;font-size:12px;padding:6px;}"
+            "QListWidget::item{padding:5px 10px;border-radius:8px;}"
+            "QListWidget::item:selected{background:rgba(120,160,255,0.25);}"
         )
         layout.addWidget(self._pending_list)
 
@@ -943,7 +1144,7 @@ class MainWindow(QMainWindow):
         layout.addWidget(self._pending_progress)
 
         self._pending_status = QLabel("就绪")
-        self._pending_status.setStyleSheet("font-size:12px;color:#566573;")
+        self._pending_status.setStyleSheet("font-size:12px;color:#7c8ba0;background:transparent;border:none;")
         layout.addWidget(self._pending_status)
 
         layout.addStretch()
@@ -1191,11 +1392,14 @@ class MainWindow(QMainWindow):
 
         page = QWidget()
         page_layout = QVBoxLayout(page)
-        page_layout.setContentsMargins(36, 30, 36, 30)
+        page_layout.setContentsMargins(30, 26, 30, 26)
         page_layout.setSpacing(16)
 
         title = QLabel(page_title)
-        title.setStyleSheet("font-size:22px;font-weight:bold;color:#2c3e50;")
+        title.setStyleSheet(
+            "font-size:24px;font-weight:800;color:#1f2d3d;"
+            "background:transparent;border:none;"
+        )
         page_layout.addWidget(title)
 
         page_stack = QStackedWidget()
@@ -1207,23 +1411,25 @@ class MainWindow(QMainWindow):
         list_layout.setSpacing(14)
 
         stats_bar = QHBoxLayout()
-        stats_bar.setSpacing(20)
+        stats_bar.setSpacing(12)
         stats_label = QLabel("点击刷新加载…")
-        stats_label.setStyleSheet("font-size:13px;color:#34495e;")
+        stats_label.setStyleSheet("font-size:13px;color:#5a6a7a;background:transparent;border:none;")
         stats_bar.addWidget(stats_label)
         stats_bar.addStretch()
         refresh_btn = QPushButton("🔄 刷新")
         refresh_btn.setStyleSheet(
-            "QPushButton{background:#3498db;color:white;border:none;"
-            "padding:6px 16px;border-radius:4px;font-size:12px;}"
-            "QPushButton:hover{background:#2980b9;}"
+            "QPushButton{background:rgba(255,255,255,0.6);color:#3a5a7a;border:1px solid rgba(255,255,255,0.8);"
+            "padding:6px 18px;border-radius:15px;font-size:12px;font-weight:600;}"
+            "QPushButton:hover{background:rgba(255,255,255,0.85);}"
         )
         stats_bar.addWidget(refresh_btn)
         analyze_btn = QPushButton("📥 分析新照片")
         analyze_btn.setStyleSheet(
-            "QPushButton{background:#27ae60;color:white;border:none;"
-            "padding:6px 16px;border-radius:4px;font-size:12px;}"
-            "QPushButton:hover{background:#219a52;}"
+            "QPushButton{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #57c78a,stop:1 #6aaee8);color:white;border:none;"
+            "padding:6px 18px;border-radius:15px;font-size:12px;font-weight:600;}"
+            "QPushButton:hover{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #49b87c,stop:1 #5a9fd8);}"
         )
         stats_bar.addWidget(analyze_btn)
         list_layout.addLayout(stats_bar)
@@ -1241,7 +1447,9 @@ class MainWindow(QMainWindow):
 
         empty_label = QLabel("暂无数据")
         empty_label.setAlignment(Qt.AlignCenter)
-        empty_label.setStyleSheet("font-size:16px;color:#95a5a6;padding:60px;")
+        empty_label.setStyleSheet(
+            "font-size:16px;color:#a5b2c2;padding:60px;background:transparent;border:none;"
+        )
         empty_label.hide()
         list_layout.addWidget(empty_label)
 
@@ -1257,30 +1465,37 @@ class MainWindow(QMainWindow):
         top_bar.setSpacing(12)
         back_btn = QPushButton("← 返回")
         back_btn.setStyleSheet(
-            "QPushButton{background:#ecf0f1;color:#2c3e50;border:none;"
-            "padding:6px 14px;border-radius:4px;font-size:12px;}"
-            "QPushButton:hover{background:#d5dbdb;}"
+            "QPushButton{background:rgba(255,255,255,0.6);color:#3a5a7a;"
+            "border:1px solid rgba(255,255,255,0.8);"
+            "padding:6px 16px;border-radius:15px;font-size:12px;font-weight:600;}"
+            "QPushButton:hover{background:rgba(255,255,255,0.9);}"
         )
         top_bar.addWidget(back_btn)
         wall_title = QLabel("")
-        wall_title.setStyleSheet("font-size:18px;font-weight:bold;color:#2c3e50;")
+        wall_title.setStyleSheet(
+            "font-size:19px;font-weight:800;color:#1f2d3d;background:transparent;border:none;"
+        )
         top_bar.addWidget(wall_title)
         wall_count = QLabel("")
-        wall_count.setStyleSheet("font-size:13px;color:#7f8c8d;")
+        wall_count.setStyleSheet("font-size:13px;color:#8a97a8;background:transparent;border:none;")
         top_bar.addWidget(wall_count)
         top_bar.addStretch()
         rename_btn = QPushButton("✏️ 重命名")
         rename_btn.setStyleSheet(
-            "QPushButton{background:#9b59b6;color:white;border:none;"
-            "padding:6px 14px;border-radius:4px;font-size:12px;}"
-            "QPushButton:hover{background:#8e44ad;}"
+            "QPushButton{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #c29ae8,stop:1 #9b8cf0);color:white;border:none;"
+            "padding:6px 16px;border-radius:15px;font-size:12px;font-weight:600;}"
+            "QPushButton:hover{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #b48ad8,stop:1 #8a7ce6);}"
         )
         top_bar.addWidget(rename_btn)
         merge_btn = QPushButton("🔗 合并角色")
         merge_btn.setStyleSheet(
-            "QPushButton{background:#16a085;color:white;border:none;"
-            "padding:6px 14px;border-radius:4px;font-size:12px;}"
-            "QPushButton:hover{background:#138d75;}"
+            "QPushButton{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #4fd1c0,stop:1 #6aaee8);color:white;border:none;"
+            "padding:6px 16px;border-radius:15px;font-size:12px;font-weight:600;}"
+            "QPushButton:hover{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #43c2b1,stop:1 #5a9fd8);}"
         )
         top_bar.addWidget(merge_btn)
         wall_layout.addLayout(top_bar)
@@ -1740,35 +1955,53 @@ class MainWindow(QMainWindow):
                 w.deleteLater()
 
     def _analyze_new_photos(self, page_key):
-        """一键增量分析：photos/ 未入库照片 → Fursee 入库 → 定向聚类 → 刷新。
+        """一键增量分析：photos/ 未入库照片 → Fursee 入库 → 增量归组 → 刷新。
 
-        同步执行（首次 177 张约数分钟，期间等待光标）；仅处理未入库照片
-        （已存在跳过），聚类只定向 fursuit_fursee（eps=0.6481 生产参数），
-        不动 face / fursuit_visual / 既有组。完成后自动刷新组列表。
+        后台线程执行（不阻塞 GUI）：仅处理未入库照片，聚类只走
+        incremental_assign（不重跑 DBSCAN、不拆散已有组）。完成后自动刷新。
         """
-        from core.identity import IdentityManager
-        QApplication.setOverrideCursor(Qt.WaitCursor)
-        try:
-            mgr = IdentityManager()
-            try:
-                result = mgr.analyze_new_photos()
-            finally:
-                mgr.close()
-        except Exception as e:
-            QApplication.restoreOverrideCursor()
-            QMessageBox.critical(self, "分析失败", f"分析新照片时出错：{e}")
+        if getattr(self, "_scan_worker", None) and self._scan_worker.isRunning():
+            self.statusBar().showMessage("分析已在进行中…", 3000)
             return
-        QApplication.restoreOverrideCursor()
-        self._load_groups_into_page(page_key)
+        state = self._group_pages.get(page_key)
+        if state is None:
+            return
+        self._scan_worker_page = page_key
+        worker = _ScanDirWorker()
+        worker.progress_updated.connect(self._on_scan_progress)
+        worker.finished_ok.connect(self._on_scan_done)
+        worker.failed.connect(self._on_scan_failed)
+        self._scan_worker = worker
+        state["refresh_btn"].setEnabled(False)
+        self.statusBar().showMessage("正在分析新照片…（后台运行，界面可继续操作）")
+        worker.start()
+
+    def _on_scan_progress(self, current, total, status=None):
+        self.statusBar().showMessage(
+            f"分析新照片 {current}/{total}：{status or ''}".strip(), 1500
+        )
+
+    def _on_scan_done(self, result):
+        state = self._group_pages.get(self._scan_worker_page)
+        if state is not None:
+            state["refresh_btn"].setEnabled(True)
+        self._load_groups_into_page(self._scan_worker_page)
+        self.statusBar().showMessage("分析完成，列表已刷新", 8000)
         QMessageBox.information(
             self,
             "分析完成",
-            f"扫描 {result['scanned']} 张\n"
-            f"新增入库 {result['new']} 张\n"
-            f"已存在跳过 {result['skipped']} 张\n"
-            f"失败 {result['failed']} 张\n\n"
-            f"新角色已按 eps=0.6481 生产参数聚类，列表已刷新。",
+            f"扫描 {result.get('scanned', 0)} 张\n"
+            f"新增入库 {result.get('new', 0)} 张\n"
+            f"已存在跳过 {result.get('skipped', 0)} 张\n"
+            f"失败 {result.get('failed', 0)} 张\n\n"
+            f"新角色已按增量分配（0.79）归组，列表已刷新。",
         )
+
+    def _on_scan_failed(self, err):
+        state = self._group_pages.get(self._scan_worker_page)
+        if state is not None:
+            state["refresh_btn"].setEnabled(True)
+        QMessageBox.critical(self, "分析失败", f"分析新照片时出错：{err}")
 
     def _load_groups_into_page(self, page_key):
         """从 IdentityManager.get_groups() 读取并渲染组列表（只读）。"""
@@ -1858,23 +2091,31 @@ class MainWindow(QMainWindow):
     def _render_group_card(self, group, display_name, page_key):
         """渲染单个角色组卡片（QFrame，左键进组 / 右键重命名）。"""
         card = QFrame()
-        card.setFixedSize(220, 240)
-        card.setStyleSheet(
-            "QFrame{background:white;border:1px solid #e1e4e8;border-radius:8px;}"
-            "QFrame:hover{border:1px solid #3498db;}"
-        )
+        card.setFixedSize(226, 248)
+        card.setStyleSheet("""
+            QFrame {
+                background: rgba(255,255,255,0.62);
+                border: 1px solid rgba(255,255,255,0.85);
+                border-radius: 18px;
+            }
+            QFrame:hover {
+                background: rgba(255,255,255,0.85);
+                border: 1px solid rgba(130,170,240,0.8);
+            }
+        """)
+        self._glass_shadow(card, blur=20, dy=4, alpha=38)
         card.setCursor(Qt.PointingHandCursor)
         card.setContextMenuPolicy(Qt.CustomContextMenu)
 
         layout = QVBoxLayout(card)
-        layout.setContentsMargins(10, 10, 10, 10)
+        layout.setContentsMargins(12, 12, 12, 12)
         layout.setSpacing(6)
 
         cover_path = group.get("cover_image") or (group.get("images") or [""])[0]
         cover_label = QLabel()
-        cover_label.setFixedSize(200, 150)
+        cover_label.setFixedSize(200, 148)
         cover_label.setAlignment(Qt.AlignCenter)
-        cover_label.setStyleSheet("background:#f0f2f5;border-radius:4px;")
+        cover_label.setStyleSheet("background:rgba(240,244,250,0.7);border-radius:12px;")
         # 封面优先选该原图里置信度最高的 detection，避免同图多 detection
         # 时封面随机落到别的主体上。
         cover_det = None
@@ -1900,36 +2141,52 @@ class MainWindow(QMainWindow):
         )
         if not pix.isNull():
             cover_label.setPixmap(
-                pix.scaled(200, 150, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+                pix.scaled(200, 148, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
             )
         else:
             cover_label.setText("无封面")
             cover_label.setStyleSheet(
-                "background:#f0f2f5;border-radius:4px;color:#bdc3c7;font-size:12px;"
+                "background:rgba(240,244,250,0.7);border-radius:12px;"
+                "color:#b9c4d2;font-size:12px;"
             )
         layout.addWidget(cover_label)
 
-        name_label = QLabel(f"🐾  {display_name}")
-        name_label.setStyleSheet("font-size:14px;font-weight:bold;color:#2c3e50;")
+        name_label = QLabel(f"{display_name}")
+        name_label.setStyleSheet(
+            "font-size:14.5px;font-weight:700;color:#1f2d3d;"
+            "background:transparent;border:none;"
+        )
         name_label.setWordWrap(True)
         layout.addWidget(name_label)
 
+        # 类别胶囊 + 次级信息行
+        meta_row = QHBoxLayout()
+        meta_row.setSpacing(6)
         category_text = self._format_group_category(group)
         if category_text:
             category_label = QLabel(category_text)
             category_label.setStyleSheet(
-                "font-size:11px;color:#8e44ad;font-weight:bold;"
+                "font-size:10.5px;color:#5b7bd5;font-weight:700;"
+                "background:rgba(120,150,255,0.14);border-radius:9px;"
+                "padding:2px 9px;border:none;"
             )
-            layout.addWidget(category_label)
+            meta_row.addWidget(category_label)
 
-        source_label = QLabel(self._format_source_types(group))
-        source_label.setStyleSheet("font-size:11px;color:#7f8c8d;")
-        if source_label.text():
-            layout.addWidget(source_label)
+        source_text = self._format_source_types(group)
+        if source_text:
+            source_label = QLabel(source_text)
+            source_label.setStyleSheet(
+                "font-size:10.5px;color:#8a97a8;background:transparent;border:none;"
+            )
+            meta_row.addWidget(source_label)
+        meta_row.addStretch()
+        layout.addLayout(meta_row)
 
         count = self._unique_photo_count(group)
         count_label = QLabel(f"{count} 张照片")
-        count_label.setStyleSheet("font-size:12px;color:#7f8c8d;")
+        count_label.setStyleSheet(
+            "font-size:11.5px;color:#8a97a8;background:transparent;border:none;"
+        )
         layout.addWidget(count_label)
 
         self._card_group_map[card] = (page_key, group, display_name)
@@ -2052,10 +2309,18 @@ class MainWindow(QMainWindow):
         显示该 detection 的 bbox 裁剪；bbox 无效回退完整原图。
         """
         tile = QFrame()
-        tile.setFixedSize(122, 138)
-        tile.setStyleSheet(
-            "QFrame{background:#f0f2f5;border-radius:4px;border:1px solid #e1e4e8;}"
-        )
+        tile.setFixedSize(124, 140)
+        tile.setStyleSheet("""
+            QFrame {
+                background: rgba(255,255,255,0.55);
+                border-radius: 14px;
+                border: 1px solid rgba(255,255,255,0.8);
+            }
+            QFrame:hover {
+                background: rgba(255,255,255,0.9);
+                border: 1px solid rgba(130,170,240,0.7);
+            }
+        """)
         tile.setCursor(Qt.PointingHandCursor)
         tile.setToolTip(f"detection #{det_idx}")
         tile_layout = QVBoxLayout(tile)
@@ -2075,14 +2340,14 @@ class MainWindow(QMainWindow):
         else:
             image_label.setText("无图")
             image_label.setStyleSheet(
-                "background:transparent;border:none;color:#bdc3c7;font-size:10px;"
+                "background:transparent;border:none;color:#b9c4d2;font-size:10px;"
             )
 
         caption = QLabel(f"detection #{det_idx}")
         caption.setFixedHeight(15)
         caption.setAlignment(Qt.AlignCenter)
         caption.setStyleSheet(
-            "background:transparent;border:none;color:#566573;font-size:10px;"
+            "background:transparent;border:none;color:#7c8ba0;font-size:10px;"
         )
         caption.setCursor(Qt.PointingHandCursor)
 
@@ -2301,6 +2566,7 @@ class MainWindow(QMainWindow):
             return
 
         self.content_stack.setCurrentIndex(row)
+        self._fade_in_page()
 
         # 切到总览页时刷新统计（构造期间 _ui_ready=False 不触发，
         # 避免测试进程打开真实库；启动后由 QTimer / 用户点击触发）
@@ -2321,6 +2587,22 @@ class MainWindow(QMainWindow):
             # Phase 3-3：设置页（row 7）懒刷新状态
             if row == 7:
                 self._refresh_settings_page()
+
+    def _fade_in_page(self):
+        """页面切换轻微淡入（140ms，结束后移除效果避免残留）。"""
+        page = self.content_stack.currentWidget()
+        if page is None:
+            return
+        eff = QGraphicsOpacityEffect(page)
+        page.setGraphicsEffect(eff)
+        anim = QPropertyAnimation(eff, b"opacity", self)
+        anim.setDuration(140)
+        anim.setStartValue(0.35)
+        anim.setEndValue(1.0)
+        anim.setEasingCurve(QEasingCurve.OutCubic)
+        anim.finished.connect(lambda: page.setGraphicsEffect(None))
+        anim.start(QPropertyAnimation.DeleteWhenStopped)
+        self._page_fade_anim = anim
 
     # ------------------------------------------------------------
     # 总览数据
@@ -2789,11 +3071,9 @@ class MainWindow(QMainWindow):
             )
 
             l1 = result.get("layer1", {})
-            l2 = result.get("layer2", {})
             l3 = result.get("layer3", {})
 
             l1_cn = l1.get("label_cn", "") if l1 else ""
-            l2_cn = l2.get("label_cn", "") if l2 else ""
             l3_cn = l3.get("label_cn", "") if l3 else ""
 
             if l1_cn:
@@ -3154,7 +3434,7 @@ class MainWindow(QMainWindow):
 
             progress_dialog.close()
 
-            report = f"自动分类完成！\n\n"
+            report = "自动分类完成！\n\n"
             report += f"✅ 成功：{stats['success']} 张\n"
             report += f"💾 缓存命中：{stats.get('cache_hits', 0)} 张\n"
             report += f"🔄 跳过重复：{stats.get('duplicates_skipped', 0)} 张\n"
@@ -3170,7 +3450,7 @@ class MainWindow(QMainWindow):
                     report += f"  【{cat}】：{count} 张\n"
 
             if stats["errors"]:
-                report += f"\n⚠️ 错误详情（前5条）：\n"
+                report += "\n⚠️ 错误详情（前5条）：\n"
                 for path, err in stats["errors"][:5]:
                     report += f"  {os.path.basename(path)}：{err}\n"
 
@@ -3277,8 +3557,8 @@ class MainWindow(QMainWindow):
 
             progress_dialog.close()
 
-            report = f"AI智能整理完成！\n\n"
-            report += f"📊 分类统计：\n"
+            report = "AI智能整理完成！\n\n"
+            report += "📊 分类统计：\n"
             for cat, count in result.get("categories", {}).items():
                 report += f"  【{cat}】：{count} 张\n"
 
@@ -3362,6 +3642,35 @@ class _AnalyzeWorker(QThread):
             result = mgr.analyze_paths(
                 self._paths,
                 progress_callback=lambda i, t, s: self.progress_updated.emit(i, t, s),
+            )
+            self.finished_ok.emit(result)
+        except Exception as e:
+            self.failed.emit(str(e))
+        finally:
+            mgr.close()
+
+
+class _ScanDirWorker(QThread):
+    """后台执行 IdentityManager.analyze_new_photos（扫 photos/ 目录）。
+
+    用于兽装/人物/角色页「📥 分析新照片」按钮——同步执行会冻结 GUI
+    数分钟，改后台后界面可继续操作。analyze_new_photos 的进度回调
+    为两参格式 progress_callback(i, total)。
+    """
+
+    progress_updated = Signal(int, int, str)
+    finished_ok = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+
+    def run(self):
+        from core.identity import IdentityManager
+        mgr = IdentityManager()
+        try:
+            result = mgr.analyze_new_photos(
+                progress_callback=lambda i, t: self.progress_updated.emit(i, t, ""),
             )
             self.finished_ok.emit(result)
         except Exception as e:

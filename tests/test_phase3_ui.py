@@ -32,9 +32,12 @@ class Phase3UiTests(unittest.TestCase):
     def test_settings_page_built(self):
         self.assertTrue(hasattr(self.window, "settings_page"))
         self.assertTrue(hasattr(self.window, "_refresh_settings_page"))
-        # 只读：无修改按钮（无保存/应用）
+        # 设置中心：关键功能按钮在位（备份/刷新统计/打开目录）
         btns = [b.text() for b in self.window.settings_page.findChildren(QPushButton)]
-        self.assertEqual(btns, ["🔄 刷新状态"])
+        for expected in ("💾 立即备份", "📂 打开备份目录", "🔄 刷新统计", "📡 重新扫描新照片"):
+            self.assertIn(expected, btns, f"设置中心缺少按钮: {expected}")
+        # 不提供危险的全量重聚按钮
+        self.assertNotIn("重新聚类全部照片", btns)
 
     def test_nav_rows_map_to_real_pages(self):
         # 收藏=5, 待处理=6, 设置=7

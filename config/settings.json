@@ -1,0 +1,57 @@
+{
+  "version": 1,
+  "ui": {
+    "mode": "new",
+    "theme": "system",
+    "liquid_glass": true,
+    "animation": true,
+    "thumbnail_size": 160,
+    "grid_columns": 6,
+    "rounded_photos": true,
+    "show_photo_info": true
+  },
+  "ai": {
+    "l1_classifier": "clip",
+    "fursuit_engine": "fursee",
+    "face_engine": "face",
+    "fursuit_threshold": 0.79,
+    "face_threshold": 0.92,
+    "md5_dedup": true,
+    "fursee_eps": 0.6481,
+    "min_samples": 1,
+    "metric": "euclidean",
+    "embedding_type": "fursuit_fursee"
+  },
+  "scan": {
+    "auto_scan_photos": true,
+    "auto_detect_fursuit": true,
+    "auto_detect_person": true,
+    "skip_duplicates": true,
+    "md5_dedup": true
+  },
+  "storage": {
+    "photos_dir": "",
+    "data_dir": "",
+    "cache_dir": "",
+    "backup_dir": "backups"
+  },
+  "backup": {
+    "auto_backup": false,
+    "frequency": "daily",
+    "keep_count": 7
+  },
+  "notifications": {
+    "analysis_done": true,
+    "scan_done": true,
+    "new_character": true,
+    "error": true
+  },
+  "data": {
+    "clean_invalid_cache": true
+  },
+  "advanced": {
+    "debug_mode": false,
+    "log_level": "INFO",
+    "cache_strategy": "balanced"
+  }
+}
