@@ -11,6 +11,7 @@ if str(_project_root) not in sys.path:
 
 from config.settings_manager import settings as S
 from ui.settings_center import SettingsCenterPage
+from ui.aurora_card import AuroraGlassCard
 
 
 from PySide6.QtCore import Qt, QSize, QTimer, QEvent, QRect, QThread, Signal, QPropertyAnimation, QEasingCurve
@@ -252,14 +253,35 @@ class MainWindow(QMainWindow):
         widget.setPalette(pal)
         widget.setAutoFillBackground(True)
 
-    @staticmethod
-    def _glass_shadow(widget, blur=28, dy=6, alpha=60):
-        """为玻璃面板添加柔和投影。"""
+    @classmethod
+    def _glass_shadow(cls, widget, blur=None, dy=None, alpha=None):
+        """为玻璃面板添加柔和投影（强度受设置参数控制）。
+
+        ui.shadow_strength 缩放透明度、ui.glass_blur 缩放弥散半径，
+        参数为 0 时阴影消失。
+        """
+        b = max(0.2, float(S.get("ui.glass_blur", 30)) / 30.0)
+        s = max(0.0, float(S.get("ui.shadow_strength", 40)) / 40.0)
+        blur = int((blur if blur is not None else 26) * b)
+        alpha = int((alpha if alpha is not None else 55) * s)
+        dy = dy if dy is not None else 5
         effect = QGraphicsDropShadowEffect(widget)
-        effect.setBlurRadius(blur)
+        effect.setBlurRadius(max(1, blur))
         effect.setOffset(0, dy)
-        effect.setColor(QColor(30, 60, 110, alpha))
+        effect.setColor(QColor(30, 60, 110, max(0, alpha)))
         widget.setGraphicsEffect(effect)
+
+    def _glass_alpha(self):
+        """玻璃面板背景不透明度（0.30~0.90）。"""
+        return float(S.get("ui.glass_opacity", 0.55))
+
+    def _corner(self):
+        """玻璃卡片圆角（8~28）。"""
+        return int(S.get("ui.corner_radius", 18))
+
+    def _thumb_radius(self):
+        """缩略图圆角（4~24）。"""
+        return int(S.get("ui.thumb_radius", 14))
 
     def _apply_theme(self):
         """根据设置应用全局主题（界面模式 + Liquid Glass + 深浅色）。
@@ -293,6 +315,24 @@ class MainWindow(QMainWindow):
         central = self.centralWidget()
         if central is not None:
             self._gradient_background(central)
+
+    def _refresh_glass_panels(self):
+        """玻璃参数修改后即时重建受影响页面（总览卡 + 已加载的分组页）。
+
+        仅刷新 UI 呈现，不触碰任何数据库 / AI 逻辑。
+        """
+        self._apply_theme()
+        if hasattr(self, "_refresh_overview"):
+            try:
+                self._refresh_overview()
+            except Exception:
+                pass
+        for key in ("fursuit", "person", "character"):
+            if self._group_page_loaded.get(key):
+                try:
+                    self._load_groups_into_page(key)
+                except Exception:
+                    pass
 
     @staticmethod
     def _liquid_qss(dark, lg):
@@ -356,6 +396,15 @@ class MainWindow(QMainWindow):
                 color: {text};
                 border-top: 1px solid rgba(160,180,210,0.25);
             }}
+            QPushButton {{
+                outline: none;
+            }}
+            QPushButton:pressed {{
+                padding-top: 2px;
+            }}
+            QListWidget {{
+                outline: none;
+            }}
         """
 
     @staticmethod
@@ -404,6 +453,15 @@ class MainWindow(QMainWindow):
             QStatusBar {
                 background: #f5f6fa; color: #7f8c8d;
                 border-top: 1px solid #e0e4e8;
+            }
+            QPushButton {
+                outline: none;
+            }
+            QPushButton:pressed {
+                padding-top: 2px;
+            }
+            QListWidget {
+                outline: none;
             }
         """
 
@@ -481,14 +539,16 @@ class MainWindow(QMainWindow):
             """)
             self.nav.setGraphicsEffect(None)
         else:
-            # ── 新版：悬浮玻璃侧栏 ──
+            # ── 新版：悬浮玻璃侧栏（参数化：透明度 / 圆角）──
+            ga = self._glass_alpha()
+            cr = self._corner()
             self.nav.setStyleSheet("""
                 QWidget {
-                    background: rgba(255,255,255,0.55);
+                    background: rgba(255,255,255,%f);
                     border: 1px solid rgba(255,255,255,0.7);
-                    border-radius: 20px;
+                    border-radius: %dpx;
                 }
-            """)
+            """ % (ga, cr))
             self.nav_list.setStyleSheet("""
                 QListWidget {
                     background: transparent;
@@ -612,13 +672,15 @@ class MainWindow(QMainWindow):
     def _make_stat_card(self, title_text):
 
         card = QFrame()
+        _ga = self._glass_alpha()
+        _cr = self._corner()
         card.setStyleSheet("""
             QFrame {
-                background: rgba(255,255,255,0.55);
+                background: rgba(255,255,255,%f);
                 border: 1px solid rgba(255,255,255,0.75);
-                border-radius: 18px;
+                border-radius: %dpx;
             }
-        """)
+        """ % (_ga, _cr))
         self._glass_shadow(card, blur=22, dy=4, alpha=40)
         card.setMinimumSize(150, 108)
 
@@ -955,17 +1017,19 @@ class MainWindow(QMainWindow):
         """单个收藏缩略图（完整原图缩略；点击预览原图；右键取消收藏）。"""
         tile = QFrame()
         tile.setFixedSize(152, 152)
+        _ga = self._glass_alpha()
+        _tr = self._thumb_radius()
         tile.setStyleSheet("""
             QFrame {
-                background: rgba(255,255,255,0.55);
-                border-radius: 16px;
+                background: rgba(255,255,255,%f);
+                border-radius: %dpx;
                 border: 1px solid rgba(255,255,255,0.8);
             }
             QFrame:hover {
                 background: rgba(255,255,255,0.9);
                 border: 1px solid rgba(240,130,150,0.6);
             }
-        """)
+        """ % (_ga, _tr))
         tile.setCursor(Qt.PointingHandCursor)
         tile.setContextMenuPolicy(Qt.CustomContextMenu)
         tile_layout = QVBoxLayout(tile)
@@ -2090,19 +2154,9 @@ class MainWindow(QMainWindow):
 
     def _render_group_card(self, group, display_name, page_key):
         """渲染单个角色组卡片（QFrame，左键进组 / 右键重命名）。"""
-        card = QFrame()
+        card = AuroraGlassCard()
         card.setFixedSize(226, 248)
-        card.setStyleSheet("""
-            QFrame {
-                background: rgba(255,255,255,0.62);
-                border: 1px solid rgba(255,255,255,0.85);
-                border-radius: 18px;
-            }
-            QFrame:hover {
-                background: rgba(255,255,255,0.85);
-                border: 1px solid rgba(130,170,240,0.8);
-            }
-        """)
+        # 玻璃底 / 极光 / 高光 / 描边由 AuroraGlassCard.paintEvent 绘制
         self._glass_shadow(card, blur=20, dy=4, alpha=38)
         card.setCursor(Qt.PointingHandCursor)
         card.setContextMenuPolicy(Qt.CustomContextMenu)
@@ -2115,7 +2169,7 @@ class MainWindow(QMainWindow):
         cover_label = QLabel()
         cover_label.setFixedSize(200, 148)
         cover_label.setAlignment(Qt.AlignCenter)
-        cover_label.setStyleSheet("background:rgba(240,244,250,0.7);border-radius:12px;")
+        cover_label.setStyleSheet("background:rgba(240,244,250,0.40);border-radius:12px;")
         # 封面优先选该原图里置信度最高的 detection，避免同图多 detection
         # 时封面随机落到别的主体上。
         cover_det = None
@@ -2197,8 +2251,37 @@ class MainWindow(QMainWindow):
         return card
 
     def eventFilter(self, obj, event):
-        """卡片/缩略图左键点击派发。"""
-        if event.type() == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+        """卡片/缩略图左键点击派发 + hover 浮起效果。"""
+        et = event.type()
+        # ── hover 浮起：角色卡片 / 照片墙 tile（frame 级）──
+        if et in (QEvent.HoverEnter, QEvent.HoverLeave):
+            is_frame = isinstance(obj, QFrame)
+            if obj in self._card_group_map or (is_frame and obj in self._tile_path_map):
+                if et == QEvent.HoverEnter:
+                    if obj in self._card_group_map:
+                        # Aurora 角色卡：浮起幅度受 aurora.hover_lift 控制
+                        # （0 = 不浮起，保持静态阴影）
+                        lift = max(0.0, float(S.get("aurora.hover_lift", 0.5)))
+                        if lift > 0.01:
+                            eff = QGraphicsDropShadowEffect(obj)
+                            eff.setBlurRadius(max(1, int(12 + 12 * lift)))
+                            eff.setOffset(0, int(2 + 6 * lift))
+                            eff.setColor(QColor(40, 70, 130, int(40 + 80 * lift)))
+                            obj.setGraphicsEffect(eff)
+                    else:
+                        eff = QGraphicsDropShadowEffect(obj)
+                        eff.setBlurRadius(18)
+                        eff.setOffset(0, 5)
+                        eff.setColor(QColor(40, 70, 130, 80))
+                        obj.setGraphicsEffect(eff)
+                else:
+                    if obj in self._card_group_map:
+                        self._glass_shadow(obj, blur=20, dy=4, alpha=38)  # 恢复静态阴影
+                    else:
+                        obj.setGraphicsEffect(None)
+                # 不拦截：hover 事件继续传播，供 AuroraGlassCard 内部驱动极光
+                return False
+        if et == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
             if obj in self._card_group_map:
                 page_key, group, display_name = self._card_group_map[obj]
                 self._open_group(page_key, group, display_name)
@@ -2310,17 +2393,19 @@ class MainWindow(QMainWindow):
         """
         tile = QFrame()
         tile.setFixedSize(124, 140)
+        _ga = self._glass_alpha()
+        _tr = self._thumb_radius()
         tile.setStyleSheet("""
             QFrame {
-                background: rgba(255,255,255,0.55);
-                border-radius: 14px;
+                background: rgba(255,255,255,%f);
+                border-radius: %dpx;
                 border: 1px solid rgba(255,255,255,0.8);
             }
             QFrame:hover {
                 background: rgba(255,255,255,0.9);
                 border: 1px solid rgba(130,170,240,0.7);
             }
-        """)
+        """ % (_ga, _tr))
         tile.setCursor(Qt.PointingHandCursor)
         tile.setToolTip(f"detection #{det_idx}")
         tile_layout = QVBoxLayout(tile)
@@ -2589,14 +2674,17 @@ class MainWindow(QMainWindow):
                 self._refresh_settings_page()
 
     def _fade_in_page(self):
-        """页面切换轻微淡入（140ms，结束后移除效果避免残留）。"""
+        """页面切换轻微淡入（时长受动画速度参数控制，动画关闭时跳过）。"""
+        if not S.get("ui.animation", True):
+            return
         page = self.content_stack.currentWidget()
         if page is None:
             return
+        speed = float(S.get("ui.animation_speed", 1.0))
         eff = QGraphicsOpacityEffect(page)
         page.setGraphicsEffect(eff)
         anim = QPropertyAnimation(eff, b"opacity", self)
-        anim.setDuration(140)
+        anim.setDuration(max(40, int(140 * speed)))
         anim.setStartValue(0.35)
         anim.setEndValue(1.0)
         anim.setEasingCurve(QEasingCurve.OutCubic)

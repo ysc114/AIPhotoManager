@@ -30,7 +30,13 @@ DEFAULT_SETTINGS = {
         "mode": "new",            # "new"=新版界面 / "classic"=经典版界面
         "theme": "system",        # "system" / "light" / "dark"
         "liquid_glass": True,     # Liquid Glass 玻璃效果
+        "glass_opacity": 0.55,    # 玻璃透明度（0.30~0.90，越小越透明）
+        "glass_blur": 30,         # 模糊/柔和强度（1~60，阴影与弥散）
+        "corner_radius": 18,      # 卡片圆角（8~28 px）
+        "thumb_radius": 14,       # 缩略图圆角（4~24 px）
+        "shadow_strength": 40,    # 卡片阴影强度（0~80）
         "animation": True,        # 界面动画
+        "animation_speed": 1.0,   # 动画速度/强度（0.5~2.0）
         "thumbnail_size": 138,    # 照片墙缩略图边长
         "grid_columns": 6,        # 每行照片数量
         "rounded_photos": True,   # 圆角照片
@@ -88,6 +94,21 @@ DEFAULT_SETTINGS = {
         "clean_invalid_cache": True,  # 清理无效缓存（空 {} 条目等）
     },
 
+    # ── ✨ Aurora 极光 ──────────────────────────────────────
+    "aurora": {
+        "enabled": True,          # 极光总开关（关闭后卡片退化为普通玻璃，零动态开销）
+        "intensity": 0.55,        # 极光强度（0.0~1.0，光晕颜色浓度）
+        "speed": 1.0,             # 流动速度（0.2~3.0，淡入淡出与内部流动速度）
+        "color_mode": "auto",     # 颜色模式："auto"自动 / "soft"柔和 / "vivid"彩色
+        "blur": 0.6,              # 光晕模糊/柔和度（0.0~1.0）
+        "radius": 0.6,            # 光晕范围（0.3~1.2，扩散半径系数）
+        "follow": 0.8,            # 鼠标跟随强度（0.0~1.0，0=不跟随固定位置）
+        "smoothing": 0.6,         # 跟随平滑度（0.0~1.0，越大惯性/延迟越大）
+        "opacity": 0.85,          # 极光整体透明度（0.0~1.0）
+        "hover_lift": 0.5,        # Hover 浮起幅度（0.0~1.0，0=不浮起）
+        "light_count": 3,         # 渐变光源数量（2~5）
+    },
+
     # ── 🛠️ 高级设置 ─────────────────────────────────────────
     "advanced": {
         "debug_mode": False,
@@ -98,11 +119,12 @@ DEFAULT_SETTINGS = {
 
 
 class SettingsManager:
-    """设置读写管理器（JSON 存储，点号路径访问）。"""
+    """设置读写管理器（JSON 存储，点号路径访问，带变更通知）。"""
 
     def __init__(self, path=None):
         self.path = Path(path) if path else DEFAULT_PATH
         self._data = {}
+        self._listeners = {}   # key 前缀 -> [callback(key, value), ...]
         self.load()
 
     # --------------------------------------------------------
@@ -151,7 +173,10 @@ class SettingsManager:
         return node
 
     def set(self, key, value, save=True):
-        """按点号路径写入，如 settings.set('ui.mode', 'classic')。"""
+        """按点号路径写入，如 settings.set('ui.mode', 'classic')。
+
+        写入后通知监听者（key 自身及所有点号前缀），供 UI 即时刷新。
+        """
         parts = key.split(".")
         node = self._data
         for part in parts[:-1]:
@@ -159,6 +184,7 @@ class SettingsManager:
         node[parts[-1]] = value
         if save:
             self.save()
+        self._notify(key, value)
         return value
 
     def set_many(self, updates, save=True):
@@ -168,6 +194,38 @@ class SettingsManager:
         if save:
             self.save()
         return True
+
+    # --------------------------------------------------------
+    # 变更通知
+    # --------------------------------------------------------
+    def on_change(self, key_prefix, callback):
+        """注册变更监听：key 或其点号前缀等于 key_prefix 时回调(key, value)。
+
+        例如监听 "aurora" 会收到 aurora.enabled / aurora.intensity 等所有
+        aurora.* 变更；监听 "aurora.intensity" 只收到该键变更。
+        返回 callback 本身（便于 off_change 注销）。
+        """
+        self._listeners.setdefault(key_prefix, []).append(callback)
+        return callback
+
+    def off_change(self, key_prefix, callback):
+        """注销变更监听（幂等）。"""
+        cbs = self._listeners.get(key_prefix)
+        if cbs and callback in cbs:
+            cbs.remove(callback)
+            if not cbs:
+                self._listeners.pop(key_prefix, None)
+
+    def _notify(self, key, value):
+        """按 key 及其前缀通知监听者。"""
+        parts = key.split(".")
+        prefixes = [".".join(parts[:i]) for i in range(1, len(parts) + 1)]
+        for prefix in prefixes:
+            for cb in tuple(self._listeners.get(prefix, ())):
+                try:
+                    cb(key, value)
+                except Exception as e:  # 监听回调异常不影响设置写入
+                    print(f"[settings] 监听回调异常 ({prefix}): {e}")
 
     # --------------------------------------------------------
     # 工具

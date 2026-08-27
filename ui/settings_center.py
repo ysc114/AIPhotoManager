@@ -28,6 +28,7 @@ from PySide6.QtWidgets import (
     QComboBox,
     QCheckBox,
     QSpinBox,
+    QSlider,
     QVBoxLayout,
     QHBoxLayout,
     QGridLayout,
@@ -58,6 +59,7 @@ class SettingsCenterPage(QWidget):
         super().__init__(parent)
         self.win = win
         self._stats_cache = None   # (timestamp, stats) 统计结果缓存
+        self._section_panels = []  # 玻璃面板注册表（参数修改后刷新）
         self._build()
 
     # --------------------------------------------------------
@@ -98,17 +100,13 @@ class SettingsCenterPage(QWidget):
         scroll.setWidget(container)
         layout.addWidget(scroll, 1)
 
-        # ── 各分区 ──
-        self._section_ai()
-        self._section_scan()
-        self._section_ui()
-        self._section_storage()
-        self._section_backup()
-        self._section_data()
-        self._section_notify()
-        self._section_shortcuts()
-        self._section_advanced()
-        self._section_about()
+        # ── 各分区（macOS 风格 6 大组）──
+        self._section_ai()           # 🧠 AI 识别
+        self._section_roles()        # 👥 角色分类
+        self._section_scan()         # 📡 照片扫描
+        self._section_display()      # 🖥️ 显示
+        self._section_data_manage()  # 🗂 数据管理（存储/备份/AI数据/通知/高级）
+        self._section_version()      # 🛠 版本与兼容模式
 
         self._body.addStretch()
 
@@ -118,13 +116,17 @@ class SettingsCenterPage(QWidget):
     def _section(self, emoji_title):
         """创建分区面板（玻璃卡容器），返回 (panel, body_layout)。"""
         panel = QFrame()
+        _ga = float(S.get("ui.glass_opacity", 0.55))
+        _cr = int(S.get("ui.corner_radius", 18))
         panel.setStyleSheet("""
             QFrame {
-                background: rgba(255,255,255,0.55);
+                background: rgba(255,255,255,%f);
                 border: 1px solid rgba(255,255,255,0.75);
-                border-radius: 16px;
+                border-radius: %dpx;
             }
-        """)
+        """ % (_ga, _cr))
+        self._glass_shadow(panel, blur=22, dy=4, alpha=40)
+        self._section_panels.append(panel)
         p_layout = QVBoxLayout(panel)
         p_layout.setContentsMargins(16, 12, 16, 14)
         p_layout.setSpacing(10)
@@ -139,6 +141,17 @@ class SettingsCenterPage(QWidget):
         p_layout.addLayout(body)
         self._body.addWidget(panel)
         return panel, body
+
+    @staticmethod
+    def _subtitle(body, text):
+        """组内子标题（macOS 设置风格的小节分隔）。"""
+        lab = QLabel(text)
+        lab.setStyleSheet(
+            "font-size:12px;font-weight:700;color:#8a97a8;"
+            "background:transparent;border:none;padding:6px 2px 0 2px;"
+            "letter-spacing:0.5px;"
+        )
+        body.addWidget(lab)
 
     def _row(self, body, label_text, widget, note=None):
         """一行：标签 + 控件 + 可选说明。"""
@@ -185,6 +198,59 @@ class SettingsCenterPage(QWidget):
                 on_change()
         cb.toggled.connect(_changed)
         return cb
+
+    @staticmethod
+    def _glass_shadow(widget, blur=22, dy=4, alpha=40):
+        """设置面板投影（强度受 ui.shadow_strength 参数缩放）。"""
+        from PySide6.QtWidgets import QGraphicsDropShadowEffect
+        from PySide6.QtGui import QColor
+        s = max(0.0, float(S.get("ui.shadow_strength", 40)) / 40.0)
+        b = max(0.2, float(S.get("ui.glass_blur", 30)) / 30.0)
+        effect = QGraphicsDropShadowEffect(widget)
+        effect.setBlurRadius(max(1, int(blur * b)))
+        effect.setOffset(0, dy)
+        effect.setColor(QColor(30, 60, 110, max(0, int(alpha * s))))
+        widget.setGraphicsEffect(effect)
+
+    def apply_glass(self):
+        """参数修改后刷新全部玻璃面板样式（透明度 / 圆角 / 阴影）。"""
+        _ga = float(S.get("ui.glass_opacity", 0.55))
+        _cr = int(S.get("ui.corner_radius", 18))
+        for panel in self._section_panels:
+            panel.setStyleSheet("""
+                QFrame {
+                    background: rgba(255,255,255,%f);
+                    border: 1px solid rgba(255,255,255,0.75);
+                    border-radius: %dpx;
+                }
+            """ % (_ga, _cr))
+            self._glass_shadow(panel, blur=22, dy=4, alpha=40)
+
+    def _slider(self, key, lo, hi, step=1, scale=1.0, suffix="", on_change=None):
+        """横向滑块（写入 SettingsManager，可选缩放显示值）。"""
+        sl = QSlider(Qt.Horizontal)
+        sl.setRange(lo, hi)
+        sl.setSingleStep(step)
+        sl.setFixedWidth(150)
+        sl.setValue(int(float(S.get(key)) * scale))
+
+        def _changed(v):
+            S.set(key, round(v / scale, 2))
+            if on_change:
+                on_change()
+        sl.valueChanged.connect(_changed)
+        wrap = QWidget()
+        wl = QHBoxLayout(wrap)
+        wl.setContentsMargins(0, 0, 0, 0)
+        wl.setSpacing(8)
+        wl.addWidget(sl)
+        val = QLabel(f"{S.get(key)}{suffix}")
+        val.setStyleSheet("font-size:12px;color:#5b7bd5;font-weight:600;"
+                          "background:rgba(255,255,255,0.5);border-radius:8px;"
+                          "padding:2px 8px;border:1px solid rgba(255,255,255,0.6);")
+        wl.addWidget(val)
+        sl.valueChanged.connect(lambda v, lb=val: lb.setText(f"{round(v / scale, 2)}{suffix}"))
+        return wrap
 
     def _glass_btn(self, text, gradient, slot):
         b = QPushButton(text)
@@ -258,7 +324,39 @@ class SettingsCenterPage(QWidget):
         body.addWidget(adv)
 
     # --------------------------------------------------------
-    # ② 📡 照片扫描
+    # ② 👥 角色分类
+    # --------------------------------------------------------
+    def _section_roles(self):
+        _, body = self._section("👥 角色分类")
+        cards = [
+            ("🐾 兽装角色", "Fursee（YOLO 检测 + 512D embedding）",
+             "兽装照片经 Fursee 识别后按 0.79 阈值增量归组。"),
+            ("👤 人物角色", "Face（InsightFace 人脸识别）",
+             "人物照片经人脸识别后按 0.92 阈值增量归组。"),
+        ]
+        for title, engine, desc in cards:
+            card = QFrame()
+            card.setStyleSheet(
+                "QFrame{background:rgba(255,255,255,0.5);border-radius:12px;"
+                "border:1px solid rgba(255,255,255,0.6);}"
+            )
+            cl = QVBoxLayout(card)
+            cl.setContentsMargins(12, 10, 12, 10)
+            t = QLabel(f"{title} · {engine}")
+            t.setStyleSheet("font-size:13px;font-weight:700;color:#1f2d3d;background:transparent;border:none;")
+            cl.addWidget(t)
+            d = QLabel(desc)
+            d.setStyleSheet("font-size:11.5px;color:#8a97a8;background:transparent;border:none;")
+            d.setWordWrap(True)
+            cl.addWidget(d)
+            body.addWidget(card)
+        note = QLabel("角色页同时显示两类角色；「合并角色」仅影响所选组，不改变其他角色。")
+        note.setStyleSheet("font-size:11px;color:#a0aab8;background:transparent;border:none;")
+        note.setWordWrap(True)
+        body.addWidget(note)
+
+    # --------------------------------------------------------
+    # ③ 📡 照片扫描
     # --------------------------------------------------------
     def _section_scan(self):
         _, body = self._section("📡 照片扫描设置")
@@ -274,19 +372,10 @@ class SettingsCenterPage(QWidget):
         body.addWidget(note)
 
     # --------------------------------------------------------
-    # ③ 🖥️ 界面设置
+    # ④ 🖥️ 显示
     # --------------------------------------------------------
-    def _section_ui(self):
-        _, body = self._section("🖥️ 界面设置")
-        self._row(
-            body, "界面模式",
-            self._combo(
-                [("新版界面", "new"), ("经典版界面", "classic")],
-                "ui.mode",
-                on_change=lambda: self._theme_changed("界面模式将在下次启动时完全生效，视觉已即时预览。"),
-            ),
-            note="仅切换外观，不改变数据库 / AI / 角色数据",
-        )
+    def _section_display(self):
+        _, body = self._section("🖥️ 显示")
         self._row(
             body, "主题",
             self._combo(
@@ -325,11 +414,100 @@ class SettingsCenterPage(QWidget):
         self._row(body, "圆角照片", self._check("ui.rounded_photos", on_change=lambda: self._theme_changed()))
         self._row(body, "显示照片信息", self._check("ui.show_photo_info"))
 
+        self._subtitle(body, "✨ Liquid Glass 微调（即时预览）")
+        self._row(body, "玻璃透明度", self._slider(
+            "ui.glass_opacity", 30, 90, scale=100, suffix="",
+            on_change=self._glass_changed), note="越小越透明")
+        self._row(body, "模糊强度", self._slider(
+            "ui.glass_blur", 1, 60, on_change=self._glass_changed), note="阴影弥散")
+        self._row(body, "卡片圆角", self._slider(
+            "ui.corner_radius", 8, 28, suffix="px", on_change=self._glass_changed))
+        self._row(body, "缩略图圆角", self._slider(
+            "ui.thumb_radius", 4, 24, suffix="px", on_change=self._glass_changed))
+        self._row(body, "阴影强度", self._slider(
+            "ui.shadow_strength", 0, 80, on_change=self._glass_changed), note="0=无阴影")
+        self._row(body, "动画速度", self._slider(
+            "ui.animation_speed", 50, 200, scale=100, suffix="×", on_change=self._glass_changed))
+        tip = QLabel("以上参数仅影响界面外观；关闭动画可提升低配机器流畅度。")
+        tip.setStyleSheet("font-size:11px;color:#a0aab8;background:transparent;border:none;")
+        tip.setWordWrap(True)
+        body.addWidget(tip)
+
+        # ── ✨ Aurora 极光（可配置极光系统，修改即时生效）──
+        self._subtitle(body, "✨ Aurora 极光")
+        self._row(
+            body, "启用 Aurora 极光",
+            self._check("aurora.enabled"),
+            note="关闭后角色卡片恢复普通玻璃",
+        )
+        self._row(
+            body, "极光强度",
+            self._slider("aurora.intensity", 0, 100, scale=100),
+            note="弱 → 强",
+        )
+        self._row(
+            body, "流动速度",
+            self._slider("aurora.speed", 20, 300, scale=100),
+            note="慢 → 快",
+        )
+        self._row(
+            body, "颜色模式",
+            self._combo(
+                [("自动", "auto"), ("柔和", "soft"), ("彩色", "vivid")],
+                "aurora.color_mode",
+            ),
+            note="自动=跟随主题",
+        )
+
+        # 高级 Aurora 设置（折叠）
+        a_fold = QToolButton()
+        a_fold.setText("▶ 高级 Aurora 设置")
+        a_fold.setCheckable(True)
+        a_fold.setStyleSheet(
+            "QToolButton{font-size:12.5px;color:#5b7bd5;font-weight:600;"
+            "background:transparent;border:none;padding:4px 0;text-align:left;}"
+        )
+        adv = QFrame()
+        adv.setStyleSheet(
+            "QFrame{background:rgba(255,255,255,0.35);border-radius:12px;"
+            "border:1px solid rgba(255,255,255,0.5);}"
+        )
+        adv_layout = QVBoxLayout(adv)
+        adv_layout.setContentsMargins(12, 8, 12, 8)
+        self._row(adv_layout, "光晕范围", self._slider("aurora.radius", 30, 120, scale=100),
+                  note="扩散半径")
+        self._row(adv_layout, "光晕模糊度", self._slider("aurora.blur", 0, 100, scale=100),
+                  note="柔和程度")
+        self._row(adv_layout, "鼠标跟随", self._slider("aurora.follow", 0, 100, scale=100),
+                  note="0=固定不跟随")
+        self._row(adv_layout, "跟随平滑度", self._slider("aurora.smoothing", 0, 100, scale=100),
+                  note="越大惯性越强")
+        self._row(adv_layout, "极光透明度", self._slider("aurora.opacity", 0, 100, scale=100),
+                  note="整体透明")
+        self._row(adv_layout, "Hover 浮起", self._slider("aurora.hover_lift", 0, 100, scale=100),
+                  note="0=不浮起")
+        self._row(adv_layout, "光源数量", self._combo(
+            [("2 个", 2), ("3 个", 3), ("4 个", 4), ("5 个", 5)],
+            "aurora.light_count",
+        ))
+        a_tip = QLabel("高级参数修改后立即生效；关闭 Aurora 时全部动画与绘制停止。")
+        a_tip.setStyleSheet("font-size:11px;color:#a0aab8;background:transparent;border:none;")
+        a_tip.setWordWrap(True)
+        adv_layout.addWidget(a_tip)
+        adv.hide()
+
+        def _a_toggle():
+            adv.setVisible(a_fold.isChecked())
+            a_fold.setText("▼ 高级 Aurora 设置" if a_fold.isChecked() else "▶ 高级 Aurora 设置")
+        a_fold.toggled.connect(_a_toggle)
+        body.addWidget(a_fold)
+        body.addWidget(adv)
+
     # --------------------------------------------------------
-    # ④ 📂 存储设置
+    # ⑤ 🗂 数据管理（子块）
     # --------------------------------------------------------
-    def _section_storage(self):
-        _, body = self._section("📂 存储设置")
+    def _section_storage(self, body):
+        self._subtitle(body, "📂 存储")
         self._storage_rows = []
         for key, label, sub in [
             ("storage.photos_dir", "照片目录", "photos"),
@@ -369,8 +547,8 @@ class SettingsCenterPage(QWidget):
     # --------------------------------------------------------
     # ⑤ 💾 数据与备份
     # --------------------------------------------------------
-    def _section_backup(self):
-        _, body = self._section("💾 数据与备份")
+    def _section_backup(self, body):
+        self._subtitle(body, "💾 数据与备份")
         self._row(body, "自动备份", self._check("backup.auto_backup"))
         self._row(
             body, "备份频率",
@@ -423,8 +601,8 @@ class SettingsCenterPage(QWidget):
     # --------------------------------------------------------
     # ⑥ 🔍 AI 数据管理
     # --------------------------------------------------------
-    def _section_data(self):
-        _, body = self._section("🔍 AI 数据管理")
+    def _section_data(self, body):
+        self._subtitle(body, "🔍 AI 数据")
         self._ai_stats_label = QLabel("点击「刷新」查看数据统计…")
         self._ai_stats_label.setStyleSheet(
             "font-size:12.5px;color:#4a5a6a;background:rgba(255,255,255,0.5);"
@@ -449,8 +627,8 @@ class SettingsCenterPage(QWidget):
     # --------------------------------------------------------
     # ⑦ 🔔 通知设置
     # --------------------------------------------------------
-    def _section_notify(self):
-        _, body = self._section("🔔 通知设置")
+    def _section_notify(self, body):
+        self._subtitle(body, "🔔 通知")
         self._row(body, "分析完成通知", self._check("notifications.analysis_done"))
         self._row(body, "扫描完成通知", self._check("notifications.scan_done"))
         self._row(body, "新角色发现通知", self._check("notifications.new_character"))
@@ -459,8 +637,8 @@ class SettingsCenterPage(QWidget):
     # --------------------------------------------------------
     # ⑧ ⌨️ 快捷键
     # --------------------------------------------------------
-    def _section_shortcuts(self):
-        _, body = self._section("⌨️ 快捷键")
+    def _section_shortcuts(self, body):
+        self._subtitle(body, "⌨️ 快捷键")
         shortcuts = [
             ("打开照片", "Ctrl+O"),
             ("扫描新照片", "Ctrl+S"),
@@ -494,8 +672,8 @@ class SettingsCenterPage(QWidget):
     # --------------------------------------------------------
     # ⑨ 🛠️ 高级设置
     # --------------------------------------------------------
-    def _section_advanced(self):
-        _, body = self._section("🛠️ 高级设置")
+    def _section_advanced(self, body):
+        self._subtitle(body, "🛠️ 高级参数（默认折叠）")
         fold = QToolButton()
         fold.setText("▶ 展开高级参数")
         fold.setCheckable(True)
@@ -537,8 +715,28 @@ class SettingsCenterPage(QWidget):
     # --------------------------------------------------------
     # ⑩ ℹ️ 关于
     # --------------------------------------------------------
-    def _section_about(self):
-        _, body = self._section("ℹ️ 关于 AIPhotoManager")
+    # --------------------------------------------------------
+    # ⑥ 🛠 版本与兼容模式
+    # --------------------------------------------------------
+    def _section_version(self):
+        _, body = self._section("🛠 版本与兼容模式")
+        self._row(
+            body, "界面模式",
+            self._combo(
+                [("新版界面", "new"), ("经典版界面", "classic")],
+                "ui.mode",
+                on_change=lambda: self._theme_changed(
+                    "界面模式已切换（视觉即时预览；完全生效建议重启）。"
+                ),
+            ),
+            note="仅切换外观，不改变数据库 / AI / 角色数据",
+        )
+        safe = QLabel("⚠️ 兼容模式仅影响界面布局与视觉。任何涉及数据迁移、"
+                      "重建角色或改库的切换都会先二次确认并保持安全保护。")
+        safe.setStyleSheet("font-size:11px;color:#a0aab8;background:transparent;border:none;")
+        safe.setWordWrap(True)
+        body.addWidget(safe)
+        self._subtitle(body, "ℹ️ 关于")
         info = [
             ("产品", "AIPhotoManager V4"),
             ("UI 版本", "Liquid Glass 设置中心"),
@@ -560,6 +758,18 @@ class SettingsCenterPage(QWidget):
             "font-size:12px;color:#7c8ba0;background:transparent;border:none;"
         )
         body.addWidget(self._db_status_label)
+
+    # --------------------------------------------------------
+    # ⑤ 🗂 数据管理（组合组）
+    # --------------------------------------------------------
+    def _section_data_manage(self):
+        _, body = self._section("🗂 数据管理")
+        self._section_storage(body)
+        self._section_backup(body)
+        self._section_data(body)
+        self._section_notify(body)
+        self._section_shortcuts(body)
+        self._section_advanced(body)
 
     # ========================================================
     # 行为
@@ -680,6 +890,13 @@ class SettingsCenterPage(QWidget):
             self.win._apply_theme()
         if extra:
             self._backup_status.setText(extra)
+
+    def _glass_changed(self):
+        """玻璃微调参数修改 → 即时预览（设置面板 + 总览卡 + 已加载分组页）。"""
+        if self.win:
+            self.apply_glass()
+            if hasattr(self.win, "_refresh_glass_panels"):
+                self.win._refresh_glass_panels()
 
     def _note_restart(self):
         self._backup_status.setText("部分界面设置将在重启 AIPhotoManager 后生效。")
