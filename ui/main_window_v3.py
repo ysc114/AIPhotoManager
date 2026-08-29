@@ -59,6 +59,12 @@ from PySide6.QtWidgets import (
 from core.image_loader import load_images_from_folder
 from core.ai_classifier import AIClassifier
 from core.ai_advisor import AIAdvisor
+from core.thumbnail_cache import thumbnail_cache
+from core.photo_quality.scorer import get_analyzer as get_pq_analyzer
+from ui.bottom_nav import BottomGlassNav
+from ui.components.glass_button import GlassButton
+from ui.components.toast import toast
+from ui.search_bar import GlassSearchBar
 
 from config.labels import LABEL_MAP
 
@@ -91,6 +97,7 @@ class MainWindow(QMainWindow):
     # 左侧导航项（顺序即 QStackedWidget 页索引）
     NAV_ITEMS = [
         "🏠  总览",
+        "🤖  AI精选",
         "🖼️  照片",
         "🐾  兽装",
         "👤  人物",
@@ -118,6 +125,8 @@ class MainWindow(QMainWindow):
         self._pixmap_cache = {}
         # 方案A：detection 主体裁剪图缓存（先裁后缩），key=(path, bbox, target)
         self._det_crop_cache = {}
+        # 磁盘缩略图缓存（共享单例）：角色卡片封面优先读缓存，后台生成
+        self._thumb_cache = thumbnail_cache
         # 照片内容 MD5 临时内存缓存（image_path → md5），仅用于 UI 照片墙
         # 去重，不落库、不新增字段；每次会话启动后首次计算后复用。
         self._path_md5_cache = {}
@@ -152,9 +161,16 @@ class MainWindow(QMainWindow):
 
         self._ui_ready = True
 
+        # ui.mode 自监听：任何路径切换界面模式（设置中心/代码）即时生效
+        self._mode_cb = S.on_change("ui.mode", lambda k, v: self._apply_theme())
+        self.destroyed.connect(self._on_main_destroyed)
+
         # 启动后事件循环运转时刷新一次总览（测试无事件循环 → 不触发，
         # 避免在测试进程中打开真实 identity_db）。
         QTimer.singleShot(0, self._refresh_overview)
+
+    def _on_main_destroyed(self):
+        S.off_change("ui.mode", self._mode_cb)
 
     # ============================================================
     # UI 构建
@@ -186,11 +202,15 @@ class MainWindow(QMainWindow):
         self.overview_page = self._build_overview_page()
         self.content_stack.addWidget(self.overview_page)
 
-        # 页 1：照片（承载原有全部功能）
+        # 页 1：🤖 AI精选（一级核心功能）
+        self.ai_pick_page = self._build_ai_pick_page()
+        self.content_stack.addWidget(self.ai_pick_page)
+
+        # 页 2：照片（承载原有全部功能）
         self.photo_page = self._build_photo_page()
         self.content_stack.addWidget(self.photo_page)
 
-        # 页 2：兽装 / 页 3：人物 / 页 4：角色（Phase 2 真实页面）
+        # 页 3：兽装 / 页 4：人物 / 页 5：角色（Phase 2 真实页面）
         self.fursuit_page = self._build_groups_page(
             "fursuit", "fursuit_character", "兽装角色", "兽装"
         )
@@ -206,7 +226,7 @@ class MainWindow(QMainWindow):
         )
         self.content_stack.addWidget(self.character_page)
 
-        # 页 5-7：收藏（真页面）/ 待处理（真页面）/ 设置（真页面）
+        # 页 6-8：收藏（真页面）/ 待处理（真页面）/ 设置（真页面）
         self.favorites_page = self._build_favorites_page()
         self.content_stack.addWidget(self.favorites_page)
         self.pending_page = self._build_pending_page()
@@ -214,7 +234,27 @@ class MainWindow(QMainWindow):
         self.settings_page = self._build_settings_page()
         self.content_stack.addWidget(self.settings_page)
 
-        root.addWidget(self.content_stack, 1)
+        # ── 全局搜索条（顶部 Liquid Glass 胶囊）+ 内容区 ──
+        self.search_bar = GlassSearchBar()
+        self.search_bar.role_activated.connect(self._open_group_from_search)
+        self.search_bar.photo_activated.connect(self._open_photo_by_path)
+        main_area = QWidget()
+        main_layout = QVBoxLayout(main_area)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(10)
+        main_layout.addWidget(self.search_bar)
+        main_layout.addWidget(self.content_stack, 1)
+
+        root.addWidget(main_area, 1)
+        self._root_layout = root
+
+        # ── 底部悬浮液态导航（新版模式；经典模式恢复左侧导航）──
+        self.bottom_nav = BottomGlassNav(parent=central)
+        self.bottom_nav.setFixedHeight(70)
+        self.bottom_nav.hide()
+        self.bottom_nav.page_changed.connect(self._on_bottom_nav_changed)
+
+        self._apply_nav_mode()
 
         self.content_stack.setCurrentIndex(0)
         self.nav_list.setCurrentRow(0)
@@ -580,6 +620,53 @@ class MainWindow(QMainWindow):
             """)
             self._glass_shadow(self.nav, blur=30, dy=8, alpha=70)
 
+        # 底部/左侧导航布局随界面模式切换（新版=底部液态，经典=左侧传统）
+        if hasattr(self, "bottom_nav"):
+            self._apply_nav_mode()
+
+    def _apply_nav_mode(self):
+        """按 ui.mode 切换导航布局：新版=底部悬浮液态导航；
+        经典=传统左侧导航（内容区底部不留白）。"""
+        if not hasattr(self, "bottom_nav") or self._root_layout is None:
+            return
+        if S.get("ui.mode", "new") == "classic":
+            self.nav.show()
+            self.bottom_nav.hide()
+            self._root_layout.setContentsMargins(16, 16, 16, 16)
+        else:
+            self.nav.hide()
+            self.bottom_nav.show()
+            # 内容区底部预留悬浮底栏空间（高 70 + 悬浮间隙 14）
+            self._root_layout.setContentsMargins(16, 16, 16, 100)
+        self._layout_bottom_nav()
+
+    def _layout_bottom_nav(self):
+        """底部导航：响应式宽度 + 居中悬浮定位（窗口缩放不溢出）。"""
+        if not getattr(self, "bottom_nav", None) or self.bottom_nav.isHidden():
+            return
+        central = self.centralWidget()
+        cw = central.width() if central and central.width() > 0 else self.width()
+        if cw <= 0:
+            return
+        margin = 28
+        nav_w = min(cw - 2 * margin, len(self.bottom_nav._entries) * 112)
+        nav_w = max(320, int(nav_w))
+        self.bottom_nav.setFixedWidth(nav_w)
+        x = (cw - nav_w) // 2
+        y = self.height() - self.bottom_nav.height() - 20
+        self.bottom_nav.move(max(0, x), max(0, y))
+
+    def _on_bottom_nav_changed(self, idx):
+        """底部导航点击 → 切页（与左侧导航同一路由）。"""
+        if idx != self.nav_list.currentRow():
+            self.nav_list.setCurrentRow(idx)
+        self._switch_page(idx)
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        if hasattr(self, "bottom_nav"):
+            self._layout_bottom_nav()
+
     # ------------------------------------------------------------
     # 总览页
     # ------------------------------------------------------------
@@ -750,7 +837,7 @@ class MainWindow(QMainWindow):
             "padding:6px 14px;border-radius:6px;font-size:12px;font-weight:bold;}"
             "QPushButton:hover{background:#c0392b;}"
         )
-        self.btn_fav_page.clicked.connect(lambda: self._switch_page(5))
+        self.btn_fav_page.clicked.connect(lambda: self._switch_page(6))
         search_layout.addWidget(self.btn_fav_page)
 
         root.addLayout(
@@ -1544,25 +1631,74 @@ class MainWindow(QMainWindow):
         wall_count.setStyleSheet("font-size:13px;color:#8a97a8;background:transparent;border:none;")
         top_bar.addWidget(wall_count)
         top_bar.addStretch()
-        rename_btn = QPushButton("✏️ 重命名")
-        rename_btn.setStyleSheet(
-            "QPushButton{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-            "stop:0 #c29ae8,stop:1 #9b8cf0);color:white;border:none;"
-            "padding:6px 16px;border-radius:15px;font-size:12px;font-weight:600;}"
-            "QPushButton:hover{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-            "stop:0 #b48ad8,stop:1 #8a7ce6);}"
-        )
+        rename_btn = GlassButton("✏️ 重命名", variant="accent")
         top_bar.addWidget(rename_btn)
-        merge_btn = QPushButton("🔗 合并角色")
-        merge_btn.setStyleSheet(
-            "QPushButton{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-            "stop:0 #4fd1c0,stop:1 #6aaee8);color:white;border:none;"
-            "padding:6px 16px;border-radius:15px;font-size:12px;font-weight:600;}"
-            "QPushButton:hover{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-            "stop:0 #43c2b1,stop:1 #5a9fd8);}"
-        )
+        merge_btn = GlassButton("🔗 合并角色", variant="normal")
         top_bar.addWidget(merge_btn)
         wall_layout.addLayout(top_bar)
+
+        # ===== ⭐ AI 精选（角色内照片精选，纯视觉层，不触碰数据库）=====
+        ai_pick_widget = QFrame()
+        _ga = float(S.get("ui.glass_opacity", 0.55))
+        _cr = int(S.get("ui.corner_radius", 18))
+        ai_pick_widget.setStyleSheet("""
+            QFrame {
+                background: rgba(255,255,255,%f);
+                border: 1px solid rgba(255,255,255,0.75);
+                border-radius: %dpx;
+            }
+        """ % (_ga, _cr))
+        ai_pick_layout = QVBoxLayout(ai_pick_widget)
+        ai_pick_layout.setContentsMargins(14, 10, 14, 12)
+        ai_pick_layout.setSpacing(8)
+
+        ai_head = QHBoxLayout()
+        ai_head.setSpacing(10)
+        ai_title = QLabel("⭐ AI精选")
+        ai_title.setStyleSheet(
+            "font-size:15px;font-weight:800;color:#1f2d3d;background:transparent;border:none;"
+        )
+        ai_head.addWidget(ai_title)
+        ai_status = QLabel("")
+        ai_status.setStyleSheet(
+            "font-size:12px;color:#8a97a8;background:transparent;border:none;"
+        )
+        ai_head.addWidget(ai_status)
+        ai_head.addStretch(1)
+        ai_count = QLabel("")
+        ai_count.setStyleSheet(
+            "font-size:12px;color:#5b7bd5;font-weight:700;"
+            "background:rgba(255,255,255,0.5);border-radius:9px;padding:2px 10px;"
+            "border:1px solid rgba(255,255,255,0.6);"
+        )
+        ai_head.addWidget(ai_count)
+        ai_reanalyze = QPushButton("↻ 重新分析")
+        ai_reanalyze.setStyleSheet(
+            "QPushButton{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #ffd166,stop:1 #f4a261);color:#5a4320;border:none;"
+            "padding:5px 14px;border-radius:13px;font-size:12px;font-weight:700;}"
+            "QPushButton:hover{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #f5c255,stop:1 #e8964f);}"
+            "QPushButton:disabled{background:rgba(255,255,255,0.5);color:#a0aab8;}"
+        )
+        ai_head.addWidget(ai_reanalyze)
+        ai_pick_layout.addLayout(ai_head)
+
+        ai_body = QScrollArea()
+        ai_body.setWidgetResizable(True)
+        ai_body.setFixedHeight(0)          # 无精选时收起
+        ai_body.setStyleSheet(
+            "QScrollArea{border:none;background:transparent;}"
+            "QScrollArea > QWidget > QWidget{background:transparent;}"
+        )
+        ai_body_container = QWidget()
+        ai_body_layout = QHBoxLayout(ai_body_container)
+        ai_body_layout.setSpacing(10)
+        ai_body_layout.setContentsMargins(0, 0, 0, 0)
+        ai_body_layout.setAlignment(Qt.AlignLeft)
+        ai_body.setWidget(ai_body_container)
+        ai_pick_layout.addWidget(ai_body)
+        wall_layout.addWidget(ai_pick_widget)
 
         wall_scroll = QScrollArea()
         wall_scroll.setWidgetResizable(True)
@@ -1596,9 +1732,16 @@ class MainWindow(QMainWindow):
             "merge_btn": merge_btn,
             "wall_grid_layout": wall_grid_layout,
             "wall_grid_container": wall_grid_container,
+            "ai_pick_widget": ai_pick_widget,
+            "ai_status": ai_status,
+            "ai_count": ai_count,
+            "ai_reanalyze": ai_reanalyze,
+            "ai_body": ai_body,
+            "ai_body_layout": ai_body_layout,
             "current_group": None,
             "current_display_name": "",
             "groups": [],
+            "pq_worker": None,
         }
 
         refresh_btn.clicked.connect(lambda _, k=page_key: self._load_groups_into_page(k))
@@ -1606,6 +1749,9 @@ class MainWindow(QMainWindow):
         back_btn.clicked.connect(lambda _, k=page_key: self._back_to_group_list(k))
         rename_btn.clicked.connect(lambda _, k=page_key: self._rename_current_group(k))
         merge_btn.clicked.connect(lambda _, k=page_key: self._merge_current_group(k))
+        ai_reanalyze.clicked.connect(
+            lambda _, k=page_key: self._start_ai_pick_analysis(k, force=True)
+        )
 
         return page
 
@@ -2203,6 +2349,28 @@ class MainWindow(QMainWindow):
                 "background:rgba(240,244,250,0.7);border-radius:12px;"
                 "color:#b9c4d2;font-size:12px;"
             )
+
+        # 缩略图缓存：封面优先读磁盘缓存（同步命中直接替换，未命中后台生成后
+        # 回调刷新）；任何失败保持上面的原图/占位结果，不影响卡片。
+        cover_local = self._resolve_display_path(cover_path)
+        bbox_json = cover_det.get("bbox") if cover_det else None
+        if cover_local and self._thumb_cache.enabled:
+            try:
+                cp = self._thumb_cache.get_cached(cover_local, 256, bbox_json)
+                if cp:
+                    cpix = QPixmap(cp)
+                    if not cpix.isNull():
+                        cover_label.setPixmap(
+                            cpix.scaled(200, 148, Qt.KeepAspectRatioByExpanding,
+                                        Qt.SmoothTransformation)
+                        )
+                else:
+                    self._thumb_cache.request(
+                        cover_local, 256, bbox_json,
+                        on_ready=lambda cpath, lab=cover_label: self._on_cover_thumb_ready(lab, cpath),
+                    )
+            except Exception as e:
+                print(f"[封面缓存] {cover_path}: {e}")
         layout.addWidget(cover_label)
 
         name_label = QLabel(f"{display_name}")
@@ -2249,6 +2417,396 @@ class MainWindow(QMainWindow):
             lambda pos, c=card, k=page_key: self._rename_group_via_card(k, c)
         )
         return card
+
+    def _on_cover_thumb_ready(self, label, cache_path):
+        """缩略图后台生成完成 → 主线程更新角色卡片封面。
+
+        失败（cache_path=None）或卡片已销毁时静默忽略（保持原图/占位显示）。
+        """
+        if not cache_path or label.parent() is None:
+            return
+        try:
+            pix = QPixmap(cache_path)
+            if pix.isNull():
+                return
+            label.setPixmap(
+                pix.scaled(200, 148, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
+            )
+        except Exception as e:
+            print(f"[封面缓存] 更新失败: {e}")
+
+    # --------------------------------------------------------
+    # ⭐ AI 精选（角色内照片精选）
+    # --------------------------------------------------------
+    def _ai_role_key(self, page_key):
+        state = self._group_pages.get(page_key)
+        if state is None or not state.get("current_group"):
+            return None
+        g = state["current_group"]
+        return str(g.get("id") or g.get("character_id") or state.get("current_display_name", ""))
+
+    def _ai_photos(self, page_key):
+        """当前角色组唯一照片列表（本地路径），供质量分析。"""
+        state = self._group_pages.get(page_key)
+        if state is None:
+            return []
+        out = []
+        for path, _det_idx in state.get("current_members", []):
+            local = self._resolve_display_path(path)
+            if local:
+                out.append(local)
+        return out
+
+    def _refresh_ai_picks(self, page_key):
+        """进入角色详情页：有缓存直接渲染；无缓存自动启动单角色分析。"""
+        state = self._group_pages.get(page_key)
+        if state is None:
+            return
+        role_key = self._ai_role_key(page_key)
+        if not role_key:
+            return
+        try:
+            analyzer = get_pq_analyzer()
+            cached = analyzer.get_role_result(role_key)
+        except Exception as e:
+            print(f"[AI精选] 缓存读取失败: {e}")
+            cached = None
+        if cached and cached.get("picks") is not None:
+            self._render_ai_picks(page_key, cached)
+            state["ai_status"].setText("已分析" if cached.get("total") else "无推荐")
+            if cached.get("total"):
+                state["ai_count"].setText(f"{cached['total']} 张精选")
+        else:
+            state["ai_status"].setText("尚未分析 · 自动开始…")
+            state["ai_count"].setText("")
+            self._clear_ai_picks(page_key)
+            self._start_ai_pick_analysis(page_key, force=False)
+
+    def _start_ai_pick_analysis(self, page_key, force=False):
+        state = self._group_pages.get(page_key)
+        if state is None or state.get("pq_worker") and state["pq_worker"].isRunning():
+            return  # 防重入
+        role_key = self._ai_role_key(page_key)
+        photos = self._ai_photos(page_key)
+        if not role_key or not photos:
+            state["ai_status"].setText("无照片可分析")
+            return
+        try:
+            analyzer = get_pq_analyzer()
+        except Exception as e:
+            state["ai_status"].setText(f"分析器不可用: {e}")
+            return
+        state["ai_status"].setText(f"分析中… 共 {len(photos)} 张")
+        state["ai_reanalyze"].setEnabled(False)
+        self._clear_ai_picks(page_key)
+        worker = PhotoQualityWorker(analyzer, role_key, photos, force=force)
+        worker.finished.connect(lambda k, r, pk=page_key: self._on_ai_pick_done(pk, r))
+        state["pq_worker"] = worker
+        worker.start()
+
+    def _on_ai_pick_done(self, page_key, result):
+        state = self._group_pages.get(page_key)
+        if state is None:
+            return
+        state["ai_reanalyze"].setEnabled(True)
+        state["pq_worker"] = None
+        if result is None:
+            state["ai_status"].setText("分析失败，请重试")
+            return
+        n = result.get("total", 0)
+        analyzed = result.get("analyzed", 0)
+        cached = result.get("cached", 0)
+        state["ai_status"].setText(
+            f"已分析 {analyzed} 张" + (f" · 缓存 {cached} 张" if cached else "")
+        )
+        state["ai_count"].setText(f"{n} 张精选" if n else "暂无精选")
+        self._render_ai_picks(page_key, result)
+        toast.show(self, f"AI 精选完成 · {n} 张推荐", kind="success")
+
+    def _clear_ai_picks(self, page_key):
+        state = self._group_pages.get(page_key)
+        if state is None:
+            return
+        lay = state["ai_body_layout"]
+        while lay.count():
+            item = lay.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
+        state["ai_body"].setFixedHeight(0)
+
+    def _render_ai_picks(self, page_key, result):
+        """渲染精选照片卡（横向滚动），并标注相似组。"""
+        state = self._group_pages.get(page_key)
+        if state is None:
+            return
+        self._clear_ai_picks(page_key)
+        picks = result.get("picks") or []
+        if not picks:
+            state["ai_body"].setFixedHeight(0)
+            return
+
+        det_map = state.get("current_det_map") or {}
+        det_by_local = {}
+        for (p, det_idx), det in det_map.items():
+            local = self._resolve_display_path(p)
+            if local:
+                det_by_local[local] = det
+
+        for pk in picks[:20]:  # 最多展示 20 张
+            card = self._make_pick_card(
+                pk, det_by_local.get(pk["path"]),
+                card_w=130, card_h=190, img_w=116, img_h=96,
+            )
+            state["ai_body_layout"].addWidget(card)
+
+        state["ai_body_layout"].addStretch(1)
+        state["ai_body"].setFixedHeight(206)
+
+    def _make_pick_card(self, pk, det_info, card_w=150, card_h=210,
+                        img_w=134, img_h=110):
+        """构建一张 AI 精选照片卡（玻璃卡：缩略图 + ★分 + 理由 + 相似组徽标）。
+
+        角色详情页（横向）与 AI 精选一级页（网格）共用。
+        """
+        path = pk["path"]
+        card = QFrame()
+        card.setFixedSize(card_w, card_h)
+        _ga = float(S.get("ui.glass_opacity", 0.55))
+        _cr = int(S.get("ui.corner_radius", 18))
+        card.setStyleSheet("""
+            QFrame {
+                background: rgba(255,255,255,%f);
+                border: 1px solid rgba(255,255,255,0.8);
+                border-radius: %dpx;
+            }
+        """ % (_ga, _cr))
+        vl = QVBoxLayout(card)
+        vl.setContentsMargins(6, 6, 6, 6)
+        vl.setSpacing(3)
+
+        img_lab = QLabel()
+        img_lab.setFixedSize(img_w, img_h)
+        img_lab.setAlignment(Qt.AlignCenter)
+        img_lab.setStyleSheet("background:rgba(240,244,250,0.4);border-radius:10px;border:none;")
+        pix = self._pixmap_for_detection(path, det_info, img_lab.size())
+        if not pix.isNull():
+            img_lab.setPixmap(
+                pix.scaled(img_w, img_h, Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            )
+        else:
+            img_lab.setText("无图")
+        vl.addWidget(img_lab)
+
+        score_lab = QLabel(f"★ {pk['score']:.2f}")
+        score_lab.setStyleSheet(
+            "font-size:12.5px;font-weight:800;color:#e8964f;background:transparent;border:none;"
+        )
+        vl.addWidget(score_lab)
+
+        reason_lab = QLabel(pk.get("reason", ""))
+        reason_lab.setStyleSheet(
+            "font-size:10px;color:#8a97a8;background:transparent;border:none;"
+        )
+        reason_lab.setWordWrap(True)
+        reason_lab.setFixedHeight(34)
+        vl.addWidget(reason_lab)
+
+        if pk.get("group"):
+            gb = QLabel(f"相似组 {pk.get('group_size', 0)} 张")
+            gb.setStyleSheet(
+                "font-size:9.5px;color:#5b7bd5;font-weight:700;"
+                "background:rgba(120,150,255,0.14);border-radius:8px;"
+                "padding:1px 8px;border:none;"
+            )
+            gb.setAlignment(Qt.AlignCenter)
+            vl.addWidget(gb)
+        vl.addStretch(1)
+        return card
+
+    # --------------------------------------------------------
+    # 🤖 AI 精选（一级页：全库照片挑最值得保留的）
+    # --------------------------------------------------------
+    _PQ_ALL_KEY = "__all__"
+
+    def _build_ai_pick_page(self):
+        """一级「AI精选」页：Aurora 入口卡 + 全库精选网格。"""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(24, 20, 24, 20)
+        layout.setSpacing(12)
+
+        title = QLabel("🤖 AI精选")
+        title.setStyleSheet(
+            "font-size:26px;font-weight:800;color:#1f2d3d;background:transparent;border:none;"
+        )
+        layout.addWidget(title)
+        sub = QLabel("AI帮你从照片中挑出最值得保留的照片")
+        sub.setStyleSheet(
+            "font-size:13px;color:#8a97a8;background:transparent;border:none;"
+        )
+        layout.addWidget(sub)
+
+        # ── Aurora 入口卡（轻微极光 + hover 彩色流动）──
+        hero = AuroraGlassCard()
+        hero.setFixedHeight(120)
+        hero_layout = QVBoxLayout(hero)
+        hero_layout.setContentsMargins(20, 14, 20, 14)
+        hero_layout.setSpacing(8)
+
+        hero_top = QHBoxLayout()
+        hero_top.setSpacing(10)
+        self.ai_pick_status = QLabel("尚未分析 · 点击「开始 AI 精选」扫描全部照片")
+        self.ai_pick_status.setStyleSheet(
+            "font-size:13px;color:#4a5a6a;background:transparent;border:none;"
+        )
+        hero_top.addWidget(self.ai_pick_status)
+        hero_top.addStretch(1)
+        self.ai_pick_count = QLabel("")
+        self.ai_pick_count.setStyleSheet(
+            "font-size:12px;color:#5b7bd5;font-weight:700;"
+            "background:rgba(255,255,255,0.5);border-radius:9px;padding:2px 10px;"
+            "border:1px solid rgba(255,255,255,0.6);"
+        )
+        hero_top.addWidget(self.ai_pick_count)
+        hero_layout.addLayout(hero_top)
+
+        self.ai_pick_start_btn = GlassButton("✨  开始AI精选", variant="accent")
+        self.ai_pick_start_btn.setStyleSheet(
+            "QPushButton{font-size:14px;font-weight:800;padding:9px 26px;}"
+        )
+        hero_layout.addWidget(self.ai_pick_start_btn, alignment=Qt.AlignLeft)
+        layout.addWidget(hero)
+
+        # ── 结果标题 + 网格 ──
+        self.ai_pick_result_title = QLabel("")
+        self.ai_pick_result_title.setStyleSheet(
+            "font-size:15px;font-weight:700;color:#1f2d3d;background:transparent;border:none;"
+        )
+        layout.addWidget(self.ai_pick_result_title)
+
+        self.ai_pick_scroll = QScrollArea()
+        self.ai_pick_scroll.setWidgetResizable(True)
+        self.ai_pick_scroll.setStyleSheet(
+            "QScrollArea{border:none;background:transparent;}"
+            "QScrollArea > QWidget > QWidget{background:transparent;}"
+        )
+        self.ai_pick_grid_container = QWidget()
+        self.ai_pick_grid = QGridLayout(self.ai_pick_grid_container)
+        self.ai_pick_grid.setSpacing(12)
+        self.ai_pick_grid.setContentsMargins(0, 0, 0, 0)
+        self.ai_pick_grid.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.ai_pick_scroll.setWidget(self.ai_pick_grid_container)
+        layout.addWidget(self.ai_pick_scroll, 1)
+
+        self.ai_pick_start_btn.clicked.connect(self._start_ai_pick_all)
+        return page
+
+    def _all_photo_paths(self):
+        """photos/ 目录全部图片（本地路径），供全库 AI 精选。"""
+        photos_dir = os.path.abspath(
+            os.path.join(os.path.dirname(__file__), "..", "photos")
+        )
+        if not os.path.isdir(photos_dir):
+            return []
+        exts = {".jpg", ".jpeg", ".png", ".webp"}
+        try:
+            names = sorted(os.listdir(photos_dir))
+        except OSError:
+            return []
+        return [
+            os.path.join(photos_dir, n).replace("\\", "/")
+            for n in names
+            if os.path.splitext(n)[1].lower() in exts
+        ]
+
+    def _refresh_ai_pick_page(self):
+        """进入 AI 精选页：读缓存渲染；无结果显示空态（不自动全库扫描）。"""
+        try:
+            analyzer = get_pq_analyzer()
+            cached = analyzer.get_role_result(self._PQ_ALL_KEY)
+        except Exception as e:
+            print(f"[AI精选页] 缓存读取失败: {e}")
+            cached = None
+        if cached and cached.get("picks") is not None:
+            self._render_ai_pick_page(cached)
+            if cached.get("total"):
+                self.ai_pick_status.setText("全库精选已生成")
+                self.ai_pick_count.setText(f"{cached['total']} 张精选")
+            else:
+                self.ai_pick_status.setText("已分析，但没有达到精选标准的照片")
+                self.ai_pick_count.setText("")
+        else:
+            self.ai_pick_status.setText("尚未分析 · 点击「开始 AI 精选」扫描全部照片")
+            self.ai_pick_count.setText("")
+            self.ai_pick_result_title.setText("")
+            self._clear_ai_pick_grid()
+
+    def _start_ai_pick_all(self):
+        """后台分析全库照片（复用 photo_quality，不阻塞 GUI）。"""
+        if getattr(self, "_ai_pick_worker", None) and self._ai_pick_worker.isRunning():
+            return
+        photos = self._all_photo_paths()
+        if not photos:
+            self.ai_pick_status.setText("未找到照片目录（photos/）")
+            return
+        try:
+            analyzer = get_pq_analyzer()
+        except Exception as e:
+            self.ai_pick_status.setText(f"分析器不可用: {e}")
+            return
+        self.ai_pick_status.setText(f"分析中… 0/{len(photos)}")
+        self.ai_pick_start_btn.setEnabled(False)
+        self.ai_pick_result_title.setText("")
+        self._clear_ai_pick_grid()
+        worker = PhotoQualityWorker(analyzer, self._PQ_ALL_KEY, photos, force=False)
+        worker.progress.connect(self._on_ai_pick_progress)
+        worker.finished.connect(self._on_ai_pick_all_done)
+        self._ai_pick_worker = worker
+        worker.start()
+
+    def _on_ai_pick_progress(self, done, total):
+        if total:
+            self.ai_pick_status.setText(f"分析中… {done}/{total}")
+
+    def _on_ai_pick_all_done(self, role_key, result):
+        self.ai_pick_start_btn.setEnabled(True)
+        self._ai_pick_worker = None
+        if result is None:
+            self.ai_pick_status.setText("分析失败，请重试")
+            return
+        n = result.get("total", 0)
+        analyzed = result.get("analyzed", 0)
+        cached = result.get("cached", 0)
+        if analyzed or cached:
+            self.ai_pick_status.setText(
+                f"已分析 {analyzed} 张" + (f" · 缓存 {cached} 张" if cached else "")
+            )
+        else:
+            self.ai_pick_status.setText("没有可分析的照片")
+        self.ai_pick_count.setText(f"{n} 张精选" if n else "暂无精选")
+        self._render_ai_pick_page(result)
+        toast.show(self, f"AI 精选完成 · {n} 张推荐", kind="success")
+
+    def _render_ai_pick_page(self, result):
+        """渲染「今日 AI 精选」照片网格。"""
+        picks = result.get("picks") or []
+        self.ai_pick_result_title.setText(
+            f"✨ 今日 AI 精选 · {len(picks)} 张" if picks else "✨ 今日 AI 精选 · 暂无推荐"
+        )
+        self._clear_ai_pick_grid()
+        cols = 6
+        for idx, pk in enumerate(picks[:60]):  # 最多展示 60 张
+            card = self._make_pick_card(pk, None)
+            r, c = divmod(idx, cols)
+            self.ai_pick_grid.addWidget(card, r, c)
+
+    def _clear_ai_pick_grid(self):
+        while self.ai_pick_grid.count():
+            item = self.ai_pick_grid.takeAt(0)
+            w = item.widget()
+            if w:
+                w.deleteLater()
 
     def eventFilter(self, obj, event):
         """卡片/缩略图左键点击派发 + hover 浮起效果。"""
@@ -2385,6 +2943,7 @@ class MainWindow(QMainWindow):
             state["wall_grid_layout"].addWidget(tile, r, c)
 
         state["page_stack"].setCurrentIndex(1)
+        self._refresh_ai_picks(page_key)
 
     def _render_photo_tile(self, path, det_idx, det_info, page_key, group):
         """渲染单张主体缩略图并显示 detection 编号。
@@ -2653,25 +3212,61 @@ class MainWindow(QMainWindow):
         self.content_stack.setCurrentIndex(row)
         self._fade_in_page()
 
+        # 底部导航胶囊跟随（任何切页路径统一同步）
+        if hasattr(self, "bottom_nav"):
+            self.bottom_nav.set_current(row)
+
         # 切到总览页时刷新统计（构造期间 _ui_ready=False 不触发，
         # 避免测试进程打开真实库；启动后由 QTimer / 用户点击触发）
         if row == 0 and self._ui_ready:
             self._refresh_overview()
 
-        # Phase 2：切到分组页（兽装2/人物3/角色4）时懒加载组列表
+        # Phase 2：切到分组页（兽装3/人物4/角色5）时懒加载组列表
         # （同样受 _ui_ready 保护，避免测试进程触发后端读取）
         if self._ui_ready:
-            page_key_map = {2: "fursuit", 3: "person", 4: "character"}
+            page_key_map = {3: "fursuit", 4: "person", 5: "character"}
             key = page_key_map.get(row)
             if key and not self._group_page_loaded.get(key, False):
                 self._load_groups_into_page(key)
                 self._group_page_loaded[key] = True
-            # Phase 3-1：收藏页（row 5）懒加载收藏列表
-            if row == 5:
+            # AI 精选页（row 1）：进入时刷新（读缓存或空态）
+            if row == 1:
+                self._refresh_ai_pick_page()
+            # Phase 3-1：收藏页（row 6）懒加载收藏列表
+            if row == 6:
                 self._load_favorites_page()
-            # Phase 3-3：设置页（row 7）懒刷新状态
-            if row == 7:
+            # Phase 3-3：设置页（row 8）懒刷新状态
+            if row == 8:
                 self._refresh_settings_page()
+
+    def _open_group_from_search(self, group):
+        """搜索结果点击角色 → 进入现有角色详情页（复用 _open_group）。"""
+        gtype = str(group.get("type") or "")
+        if gtype == "fursuit_character":
+            page_key, row = "fursuit", 3
+        elif gtype == "real_person":
+            page_key, row = "person", 4
+        else:
+            page_key, row = "character", 5
+        # 未加载则懒加载（_switch_page 内部也会处理）
+        if not self._group_page_loaded.get(page_key, False):
+            self._load_groups_into_page(page_key)
+            self._group_page_loaded[page_key] = True
+        display_name = group.get("name") or f"角色 {str(group.get('character_id') or '')[:10]}"
+        self._switch_page(row)
+        self._open_group(page_key, group, display_name)
+
+    def _open_photo_by_path(self, path):
+        """搜索结果点击照片 → 打开现有照片预览（复用 show_preview）。"""
+        resolved = self._resolve_display_path(path) or path
+        if resolved in self.image_list:
+            idx = self.image_list.index(resolved)
+        else:
+            self.image_list.append(resolved)
+            self.image_list_widget.addItem(os.path.basename(resolved))
+            idx = len(self.image_list) - 1
+        self._switch_page(2)  # 照片页
+        self.show_preview(idx)
 
     def _fade_in_page(self):
         """页面切换轻微淡入（时长受动画速度参数控制，动画关闭时跳过）。"""
@@ -3765,3 +4360,31 @@ class _ScanDirWorker(QThread):
             self.failed.emit(str(e))
         finally:
             mgr.close()
+
+
+class PhotoQualityWorker(QThread):
+    """后台执行单角色「评分 + 近似分组 + AI 精选」（不阻塞 GUI）。
+
+    纯计算：只读照片文件 + 写 photo_quality 独立缓存，不触碰 identity_db。
+    """
+
+    finished = Signal(str, object)   # (role_key, result|None)
+    progress = Signal(int, int)      # (done, total)
+
+    def __init__(self, analyzer, role_key, photos, force=False, parent=None):
+        super().__init__(parent)
+        self._analyzer = analyzer
+        self._role_key = role_key
+        self._photos = list(photos)
+        self._force = force
+
+    def run(self):
+        try:
+            r = self._analyzer.analyze_role(
+                self._role_key, self._photos, force=self._force,
+                progress_callback=lambda d, t: self.progress.emit(d, t),
+            )
+            self.finished.emit(self._role_key, r)
+        except Exception as e:
+            print(f"[AI精选] 分析失败: {e}")
+            self.finished.emit(self._role_key, None)

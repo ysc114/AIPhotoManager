@@ -109,6 +109,14 @@ DEFAULT_SETTINGS = {
         "light_count": 3,         # 渐变光源数量（2~5）
     },
 
+    # ── 🧭 底部导航（液态玻璃导航栏）─────────────────────────
+    "nav": {
+        "show_text": True,            # 显示文字（窄窗口自动只显示图标）
+        "animation": True,            # 液态动画开关
+        "animation_strength": 1.0,    # 动画强度（0.5~2.0）
+        "liquid_effect": "standard",  # 液态效果："standard"标准 / "soft"柔和 / "vivid"明显
+    },
+
     # ── 🛠️ 高级设置 ─────────────────────────────────────────
     "advanced": {
         "debug_mode": False,

@@ -40,22 +40,31 @@ class Phase3UiTests(unittest.TestCase):
         self.assertNotIn("重新聚类全部照片", btns)
 
     def test_nav_rows_map_to_real_pages(self):
-        # 收藏=5, 待处理=6, 设置=7
-        self.window._switch_page(5)
+        # 新版导航（AI精选提升为一级）：AI精选=1, 收藏=6, 待处理=7, 设置=8
+        self.window._switch_page(1)
         self.assertIs(
             self.window.content_stack.currentWidget(),
-            self.window.favorites_page,
+            self.window.ai_pick_page,
         )
         self.window._switch_page(6)
         self.assertIs(
             self.window.content_stack.currentWidget(),
-            self.window.pending_page,
+            self.window.favorites_page,
         )
         self.window._switch_page(7)
         self.assertIs(
             self.window.content_stack.currentWidget(),
+            self.window.pending_page,
+        )
+        self.window._switch_page(8)
+        self.assertIs(
+            self.window.content_stack.currentWidget(),
             self.window.settings_page,
         )
+        # 导航项数量与顺序
+        items = [self.window.nav_list.item(i).text() for i in range(self.window.nav_list.count())]
+        self.assertEqual(len(items), 9)
+        self.assertIn("AI精选", items[1])
 
     def test_photo_page_favorite_button(self):
         btns = [b.text() for b in self.window.photo_page.findChildren(QPushButton)]

@@ -26,9 +26,7 @@ from PySide6.QtWidgets import (
     QLabel,
     QPushButton,
     QComboBox,
-    QCheckBox,
     QSpinBox,
-    QSlider,
     QVBoxLayout,
     QHBoxLayout,
     QGridLayout,
@@ -39,6 +37,11 @@ from PySide6.QtWidgets import (
 )
 
 from config.settings_manager import settings as S
+from ui.components.glass_card import GlassCard
+from ui.components.glass_button import GlassButton
+from ui.components.animated_toggle import AnimatedToggle
+from ui.components.glass_slider import GlassSlider
+from ui.components.toast import toast
 
 _PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -114,18 +117,8 @@ class SettingsCenterPage(QWidget):
     # 分区工具
     # --------------------------------------------------------
     def _section(self, emoji_title):
-        """创建分区面板（玻璃卡容器），返回 (panel, body_layout)。"""
-        panel = QFrame()
-        _ga = float(S.get("ui.glass_opacity", 0.55))
-        _cr = int(S.get("ui.corner_radius", 18))
-        panel.setStyleSheet("""
-            QFrame {
-                background: rgba(255,255,255,%f);
-                border: 1px solid rgba(255,255,255,0.75);
-                border-radius: %dpx;
-            }
-        """ % (_ga, _cr))
-        self._glass_shadow(panel, blur=22, dy=4, alpha=40)
+        """创建分区面板（GlassCard 玻璃容器），返回 (panel, body_layout)。"""
+        panel = GlassCard(aurora=False)
         self._section_panels.append(panel)
         p_layout = QVBoxLayout(panel)
         p_layout.setContentsMargins(16, 12, 16, 14)
@@ -189,7 +182,7 @@ class SettingsCenterPage(QWidget):
         return c
 
     def _check(self, key, on_change=None):
-        cb = QCheckBox()
+        cb = AnimatedToggle()
         cb.setChecked(bool(S.get(key)))
 
         def _changed():
@@ -213,22 +206,14 @@ class SettingsCenterPage(QWidget):
         widget.setGraphicsEffect(effect)
 
     def apply_glass(self):
-        """参数修改后刷新全部玻璃面板样式（透明度 / 圆角 / 阴影）。"""
-        _ga = float(S.get("ui.glass_opacity", 0.55))
-        _cr = int(S.get("ui.corner_radius", 18))
+        """参数修改后刷新全部 GlassCard 面板（透明度 / 圆角 / 阴影）。"""
         for panel in self._section_panels:
-            panel.setStyleSheet("""
-                QFrame {
-                    background: rgba(255,255,255,%f);
-                    border: 1px solid rgba(255,255,255,0.75);
-                    border-radius: %dpx;
-                }
-            """ % (_ga, _cr))
-            self._glass_shadow(panel, blur=22, dy=4, alpha=40)
+            if hasattr(panel, "refresh_glass"):
+                panel.refresh_glass()
 
     def _slider(self, key, lo, hi, step=1, scale=1.0, suffix="", on_change=None):
         """横向滑块（写入 SettingsManager，可选缩放显示值）。"""
-        sl = QSlider(Qt.Horizontal)
+        sl = GlassSlider(Qt.Horizontal)
         sl.setRange(lo, hi)
         sl.setSingleStep(step)
         sl.setFixedWidth(150)
@@ -252,14 +237,8 @@ class SettingsCenterPage(QWidget):
         sl.valueChanged.connect(lambda v, lb=val: lb.setText(f"{round(v / scale, 2)}{suffix}"))
         return wrap
 
-    def _glass_btn(self, text, gradient, slot):
-        b = QPushButton(text)
-        b.setStyleSheet(
-            f"QPushButton{{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
-            f"stop:0 {gradient[0]},stop:1 {gradient[1]});color:white;border:none;"
-            f"padding:8px 20px;border-radius:16px;font-size:12.5px;font-weight:600;}}"
-            f"QPushButton:hover{{opacity:0.9;}}"
-        )
+    def _glass_btn(self, text, gradient, slot, variant=None):
+        b = GlassButton(text, variant=variant or "accent")
         b.clicked.connect(slot)
         return b
 
@@ -432,6 +411,41 @@ class SettingsCenterPage(QWidget):
         tip.setStyleSheet("font-size:11px;color:#a0aab8;background:transparent;border:none;")
         tip.setWordWrap(True)
         body.addWidget(tip)
+
+        # ── 🧭 底部导航（液态玻璃导航栏，修改即时生效）──
+        self._subtitle(body, "🧭 底部导航")
+        self._row(
+            body, "导航样式",
+            self._combo(
+                [("Liquid Glass（底部悬浮）", "new"), ("经典（左侧栏）", "classic")],
+                "ui.mode",
+                on_change=lambda: self._theme_changed(),
+            ),
+            note="切换 UI 模式",
+        )
+        self._row(
+            body, "显示文字",
+            self._check("nav.show_text"),
+            note="窄窗口自动只显示图标",
+        )
+        self._row(
+            body, "液态动画",
+            self._check("nav.animation"),
+            note="关闭后选中无滑动动画",
+        )
+        self._row(
+            body, "动画强度",
+            self._slider("nav.animation_strength", 50, 200, scale=100, suffix="×"),
+            note="弱 → 强",
+        )
+        self._row(
+            body, "液态效果",
+            self._combo(
+                [("标准", "standard"), ("柔和", "soft"), ("明显", "vivid")],
+                "nav.liquid_effect",
+            ),
+            note="胶囊拉伸幅度",
+        )
 
         # ── ✨ Aurora 极光（可配置极光系统，修改即时生效）──
         self._subtitle(body, "✨ Aurora 极光")
@@ -930,8 +944,10 @@ class SettingsCenterPage(QWidget):
             self._backup_status.setText(
                 f"✅ 备份完成：{target_dir}\\identity_db.sqlite"
             )
+            toast.show(self, "数据库备份完成", kind="success")
         except Exception as e:
             self._backup_status.setText(f"❌ 备份失败：{e}")
+            toast.show(self, f"备份失败：{e}", kind="warning")
 
     def _prune_backups(self, bk_root):
         keep = int(S.get("backup.keep_count", 7) or 7)
