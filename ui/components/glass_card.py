@@ -31,7 +31,7 @@ class GlassCard(QFrame):
 
         self._aurora_layer = None
         if self._use_aurora:
-            self._aurora_layer = AuroraGlassCard(self)
+            self._aurora_layer = AuroraGlassCard(self, refract=False)  # 装饰层不折射
             self._aurora_layer.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
         self._apply_glass_style()
