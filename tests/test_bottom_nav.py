@@ -54,10 +54,11 @@ class BottomNavTests(unittest.TestCase):
     # 1. 导航项与初始胶囊
     def test_entries_and_capsule(self):
         nav = self._nav()
-        self.assertEqual(nav._n, 9)
+        self.assertEqual(nav._n, 10)
         keys = [k for k, _ in nav._entries]
         self.assertEqual(keys[0], "overview")
         self.assertIn("ai_pick", keys)
+        self.assertIn("duplicates", keys)
         self.assertIn("settings", keys)
         r = nav._capsule_rect(0)
         self.assertAlmostEqual(nav._capsule[0], r.x(), delta=0.5)
@@ -117,7 +118,7 @@ class BottomNavTests(unittest.TestCase):
         nav = self._nav()
         got = []
         nav.page_changed.connect(lambda i: got.append(i))
-        QTest.mouseClick(nav, Qt.LeftButton, pos=QPoint(int(nav.width() / 9 * 4.5), 35))
+        QTest.mouseClick(nav, Qt.LeftButton, pos=QPoint(int(nav.width() / 10 * 4.5), 35))
         self.assertEqual(got, [4])
 
 

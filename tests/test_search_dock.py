@@ -62,8 +62,11 @@ class SearchIndexTests(unittest.TestCase):
                         "文件名搜索应命中")
 
     def test_search_empty_query(self):
+        """空关键词：API 返回受 limit 限制的全量（筛选可独立生效），
+        面板显隐由 UI 层控制。"""
         r = self.idx.search("")
-        self.assertEqual(r, {"roles": [], "photos": []})
+        self.assertLessEqual(len(r["roles"]), 15)
+        self.assertLessEqual(len(r["photos"]), 20)
 
     def test_search_no_match(self):
         r = self.idx.search("__不存在_zzz__")
@@ -190,10 +193,11 @@ class DockTests(unittest.TestCase):
         self.assertFalse(bn._aurora._timer.isActive())
         S.set("aurora.enabled", True)
 
-    def test_dock_nine_entries(self):
-        self.assertEqual(self.win.bottom_nav._n, 9)
+    def test_dock_ten_entries(self):
+        self.assertEqual(self.win.bottom_nav._n, 10)
         keys = [k for k, _ in self.win.bottom_nav._entries]
         self.assertEqual(keys[0], "overview")
+        self.assertIn("duplicates", keys)
         self.assertEqual(keys[-1], "settings")
 
 

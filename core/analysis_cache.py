@@ -83,6 +83,15 @@ class AnalysisCache:
             return None
         return result.get("_category_cn")
 
+    def remove(self, image_path):
+        """删除单个路径的缓存（重复照片清理用）；不存在返回 False。"""
+        path = image_path.replace("\\", "/")
+        if path in self._cache:
+            del self._cache[path]
+            self._save_to_disk()
+            return True
+        return False
+
     def set_category_cn(self, image_path, category_cn):
         """设置人工修正后的分类名"""
         path = image_path.replace("\\", "/")

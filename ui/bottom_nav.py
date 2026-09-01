@@ -34,6 +34,7 @@ DEFAULT_ENTRIES = [
     ("character", "角色"),
     ("favorites", "收藏"),
     ("pending", "待处理"),
+    ("duplicates", "重复照片"),
     ("settings", "设置"),
 ]
 
@@ -65,7 +66,7 @@ class BottomGlassNav(QWidget):
         self.setCursor(Qt.PointingHandCursor)
 
         # ── Aurora 玻璃层（参数联动：关闭后零极光零 timer）──
-        self._aurora = AuroraGlassCard(self)
+        self._aurora = AuroraGlassCard(self, refract=False)  # Dock 装饰层不启用物理折射
         self._aurora.setAttribute(Qt.WA_TransparentForMouseEvents, True)
 
         # ── 悬浮投影：透明底 + 圆角投影跟随玻璃形状（Dock 悬浮感）──
