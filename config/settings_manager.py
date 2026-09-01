@@ -14,6 +14,7 @@ UI / AI / 扫描 / 备份模块统一通过 SettingsManager 读写，
 import json
 import os
 import tempfile
+import weakref
 from pathlib import Path
 
 CONFIG_DIR = Path(__file__).resolve().parent
@@ -109,6 +110,15 @@ DEFAULT_SETTINGS = {
         "light_count": 3,         # 渐变光源数量（2~5）
     },
 
+    # ── 🧊 Liquid Glass 折射层（pyglass vendor 引擎）────────────
+    "glass": {
+        "enabled": True,          # Liquid Glass 总开关（关闭后恢复普通玻璃；pyglass 不可用时自动忽略）
+        "thickness": 0.35,        # 玻璃厚度 / 折射强度（0.0~1.0，越大边缘弯曲/色散越明显）
+        "frost": 0.25,            # 玻璃模糊 / Frost（0.0~1.0，越大越磨砂）
+        "opacity": 0.35,          # 玻璃透明度（0.0~1.0，影响内部色调强度）
+        "mouse_follow": True,     # 鼠标跟随：hover 时实时折射跟随（False=进入时折射一次）
+    },
+
     # ── 🧭 底部导航（液态玻璃导航栏）─────────────────────────
     "nav": {
         "show_text": True,            # 显示文字（窄窗口自动只显示图标）
@@ -153,7 +163,11 @@ class SettingsManager:
         return self
 
     def save(self):
-        """原子写入 settings.json（临时文件 + os.replace）。"""
+        """原子写入 settings.json（临时文件 + os.replace）。
+
+        写盘失败（如目录被同步/占用）时不抛异常：内存已更新，下次
+        set/save 时重试；避免设置页因持久化失败而崩溃。
+        """
         os.makedirs(self.path.parent, exist_ok=True)
         fd, tmp = tempfile.mkstemp(
             prefix="settings_", suffix=".json", dir=str(self.path.parent)
@@ -168,7 +182,6 @@ class SettingsManager:
                 os.remove(tmp)
             except OSError:
                 pass
-            raise
         return True
 
     def get(self, key, default=None):
@@ -212,26 +225,52 @@ class SettingsManager:
         例如监听 "aurora" 会收到 aurora.enabled / aurora.intensity 等所有
         aurora.* 变更；监听 "aurora.intensity" 只收到该键变更。
         返回 callback 本身（便于 off_change 注销）。
+
+        bound method 回调以「弱引用 + 方法名」存储：监听对象被垃圾回收后
+        自动移除，不会因回调持有对象引用造成泄漏（幽灵回调）。
         """
-        self._listeners.setdefault(key_prefix, []).append(callback)
+        entry = self._make_entry(callback)
+        self._listeners.setdefault(key_prefix, []).append(entry)
+        return callback
+
+    @staticmethod
+    def _make_entry(callback):
+        import inspect
+        if inspect.ismethod(callback):
+            return (weakref.ref(callback.__self__), callback.__name__)
         return callback
 
     def off_change(self, key_prefix, callback):
         """注销变更监听（幂等）。"""
         cbs = self._listeners.get(key_prefix)
-        if cbs and callback in cbs:
-            cbs.remove(callback)
-            if not cbs:
-                self._listeners.pop(key_prefix, None)
+        if not cbs:
+            return
+        entry = self._make_entry(callback)
+        try:
+            cbs.remove(entry)
+        except ValueError:
+            pass
+        if not cbs:
+            self._listeners.pop(key_prefix, None)
 
     def _notify(self, key, value):
-        """按 key 及其前缀通知监听者。"""
+        """按 key 及其前缀通知监听者（弱引用条目自动清理）。"""
         parts = key.split(".")
         prefixes = [".".join(parts[:i]) for i in range(1, len(parts) + 1)]
         for prefix in prefixes:
-            for cb in tuple(self._listeners.get(prefix, ())):
+            cbs = self._listeners.get(prefix)
+            if not cbs:
+                continue
+            for entry in tuple(cbs):
                 try:
-                    cb(key, value)
+                    if isinstance(entry, tuple):
+                        owner = entry[0]()
+                        if owner is None:
+                            cbs.remove(entry)   # 对象已回收 → 自动移除
+                            continue
+                        getattr(owner, entry[1])(key, value)
+                    else:
+                        entry(key, value)
                 except Exception as e:  # 监听回调异常不影响设置写入
                     print(f"[settings] 监听回调异常 ({prefix}): {e}")
 

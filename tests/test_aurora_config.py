@@ -124,8 +124,11 @@ class AuroraCardTests(unittest.TestCase):
             prod.set(f"aurora.{k}", v)
 
     # 5. 关闭后零定时器，hover 不驱动
+    # （Liquid Glass 折射引入后：aurora 关闭仅当 glass 也关闭时才零 timer；
+    #  glass 开启时 hover 会启动 timer 驱动折射——见 test_liquid_glass.py）
     def test_disabled_zero_overhead(self):
         from config.settings_manager import settings as prod
+        prod.set("glass.enabled", False)   # 双关：纯普通玻璃，零动态开销
         card = AuroraGlassCard()
         card.resize(226, 248)
         prod.set("aurora.enabled", False)
@@ -138,6 +141,7 @@ class AuroraCardTests(unittest.TestCase):
         self.assertFalse(card._hovering)
         self.assertEqual(card._glow_alpha, 0.0)
         card.deleteLater()
+        prod.set("glass.enabled", True)
 
     # 6. 强度映射：base/max 随 intensity 单调
     def test_intensity_mapping(self):

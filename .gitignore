@@ -67,3 +67,6 @@ backups/
 tmp_*
 =0.80
 tmp_detections/
+
+# --- Settings temp (mkstemp 残留) ---
+config/settings_*.json

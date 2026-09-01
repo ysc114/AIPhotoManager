@@ -517,6 +517,38 @@ class SettingsCenterPage(QWidget):
         body.addWidget(a_fold)
         body.addWidget(adv)
 
+        # ── 🧊 Liquid Glass 折射层（pyglass 物理折射，独立于 Aurora）──
+        self._subtitle(body, "🧊 Liquid Glass")
+        self._row(
+            body, "启用 Liquid Glass",
+            self._check("glass.enabled"),
+            note="物理折射玻璃（Snell/色散/Frost）；关闭后恢复普通玻璃",
+        )
+        self._row(
+            body, "玻璃厚度 / 折射强度",
+            self._slider("glass.thickness", 0, 100, scale=100),
+            note="越大边缘弯曲与色散越明显",
+        )
+        self._row(
+            body, "玻璃模糊 / Frost",
+            self._slider("glass.frost", 0, 100, scale=100),
+            note="越大越磨砂（霜化）",
+        )
+        self._row(
+            body, "玻璃透明度",
+            self._slider("glass.opacity", 0, 100, scale=100),
+            note="影响玻璃内部色调",
+        )
+        self._row(
+            body, "鼠标跟随",
+            self._check("glass.mouse_follow"),
+            note="Hover 时实时折射跟随鼠标",
+        )
+        g_tip = QLabel("Liquid Glass 与 Aurora 独立开关：可只开玻璃、只开极光、或全开；全关时恢复普通卡片。")
+        g_tip.setStyleSheet("font-size:11px;color:#a0aab8;background:transparent;border:none;")
+        g_tip.setWordWrap(True)
+        body.addWidget(g_tip)
+
     # --------------------------------------------------------
     # ⑤ 🗂 数据管理（子块）
     # --------------------------------------------------------
