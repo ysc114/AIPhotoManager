@@ -9,4 +9,4 @@
     groups = manager.analyze_folder(image_paths)
 """
 
-from core.identity.manager import IdentityManager
+from core.identity.manager import IdentityManager, get_reader

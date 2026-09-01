@@ -537,6 +537,9 @@ class IdentityManager:
         }
 
     def close(self):
+        # 共享只读 reader：进程级复用，close() 为 no-op（由 get_reader 持有）
+        if getattr(self, "_shared_reader", False):
+            return
         # 关闭 Fursee worker（若已启动）；失败不阻断数据库关闭
         if self._fursee_adapter is not None:
             try:
@@ -544,3 +547,23 @@ class IdentityManager:
             except Exception as e:
                 print(f"[IdentityManager] Fursee worker 关闭失败：{e}")
         self.db.close()
+
+
+_READER = None
+
+
+def get_reader():
+    """进程级共享只读 IdentityManager（主线程 UI 只读路径用）。
+
+    - 惰性创建，进程生命周期复用；close() 对共享实例为 no-op
+      （调用方可沿用 try/finally mgr.close() 模式）
+    - 仅限**主线程只读**用途（get_groups / list_favorites 等 SELECT）
+    - 写操作（重命名/合并/收藏增删/分析入库）必须使用新建实例，
+      避免共享连接跨线程与事务污染
+    """
+    global _READER
+    if _READER is None:
+        r = IdentityManager()
+        r._shared_reader = True
+        _READER = r
+    return _READER
