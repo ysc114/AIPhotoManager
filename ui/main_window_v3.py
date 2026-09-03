@@ -260,7 +260,6 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
 
         # ── 底部悬浮液态导航（新版模式；经典模式恢复左侧导航）──
         self.bottom_nav = BottomGlassNav(parent=central)
-        self.bottom_nav.setFixedHeight(70)
         self.bottom_nav.hide()
         self.bottom_nav.page_changed.connect(self._on_bottom_nav_changed)
 
@@ -646,24 +645,24 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         else:
             self.nav.hide()
             self.bottom_nav.show()
-            # 内容区底部预留悬浮底栏空间（高 70 + 悬浮间隙 14）
-            self._root_layout.setContentsMargins(16, 16, 16, 100)
+            # 内容区底部预留悬浮 Dock 空间（栏高 86 + 悬浮间隙 26 + 余量）
+            self._root_layout.setContentsMargins(16, 16, 16, 86 + 26 + 12)
         self._layout_bottom_nav()
 
     def _layout_bottom_nav(self):
-        """底部导航：响应式宽度 + 居中悬浮定位（窗口缩放不溢出）。"""
+        """底部导航：自适应宽度 + 居中悬浮定位（窗口缩放不溢出）。"""
         if not getattr(self, "bottom_nav", None) or self.bottom_nav.isHidden():
             return
         central = self.centralWidget()
         cw = central.width() if central and central.width() > 0 else self.width()
         if cw <= 0:
             return
-        margin = 28
-        nav_w = min(cw - 2 * margin, len(self.bottom_nav._entries) * 112)
+        margin = 40
+        nav_w = min(cw - 2 * margin, int(self.bottom_nav.natural_width()))
         nav_w = max(320, int(nav_w))
         self.bottom_nav.setFixedWidth(nav_w)
         x = (cw - nav_w) // 2
-        y = self.height() - self.bottom_nav.height() - 20
+        y = self.height() - self.bottom_nav.height() - 26
         self.bottom_nav.move(max(0, x), max(0, y))
 
     def _on_bottom_nav_changed(self, idx):

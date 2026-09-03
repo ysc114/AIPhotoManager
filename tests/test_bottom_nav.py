@@ -129,14 +129,19 @@ class BottomNavTests(unittest.TestCase):
         settle(self.app, 3)
         self.assertTrue(nav._show_text())
 
-    # 6. Aurora 关闭 → 极光层零 timer
-    def test_aurora_off_zero_timer(self):
+    # 6. Dock 专属极光：nav.aurora 开 → 动画 timer 运行；关 → 停表
+    def test_dock_aurora_timer(self):
         nav = self._nav()
-        S.set("aurora.enabled", False)
-        settle(self.app, 8)
-        active = [a for a in nav.findChildren(type(nav._aurora)) if a._timer.isActive()]
-        self.assertEqual(active, [])
-        S.set("aurora.enabled", True)
+        orig = bool(S.get("nav.aurora", True))
+        try:
+            S.set("nav.aurora", True)
+            settle(self.app, 5)
+            self.assertTrue(nav._anim_timer.isActive(), "nav.aurora 开启时应有流动动画")
+            S.set("nav.aurora", False)
+            settle(self.app, 5)
+            self.assertFalse(nav._anim_timer.isActive(), "nav.aurora 关闭时应零动画")
+        finally:
+            S.set("nav.aurora", orig)
 
     # 7. 点击信号
     def test_click_signal(self):

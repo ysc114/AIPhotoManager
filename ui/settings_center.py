@@ -451,6 +451,16 @@ class SettingsCenterPage(QWidget):
             ),
             note="胶囊拉伸幅度",
         )
+        self._row(
+            body, "导航极光",
+            self._check("nav.aurora"),
+            note="Dock 背景轻微彩色流动（独立于卡片极光开关）",
+        )
+        self._row(
+            body, "导航毛玻璃",
+            self._check("nav.glass"),
+            note="玻璃折射/模糊背景（pyglass 可用时生效）",
+        )
 
         # ── ✨ Aurora 极光（可配置极光系统，修改即时生效）──
         self._subtitle(body, "✨ Aurora 极光")

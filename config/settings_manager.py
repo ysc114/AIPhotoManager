@@ -125,6 +125,8 @@ DEFAULT_SETTINGS = {
         "animation": True,            # 液态动画开关
         "animation_strength": 1.0,    # 动画强度（0.5~2.0）
         "liquid_effect": "standard",  # 液态效果："standard"标准 / "soft"柔和 / "vivid"明显
+        "aurora": True,               # Dock 专属极光流动（独立于卡片 aurora.enabled）
+        "glass": True,                # Dock 毛玻璃折射背景（pyglass 可用时）
     },
 
     # ── 🛠️ 高级设置 ─────────────────────────────────────────
