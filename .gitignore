@@ -70,3 +70,6 @@ tmp_detections/
 
 # --- Settings temp (mkstemp 残留) ---
 config/settings_*.json
+
+# Suspect pairs human decisions (role center 2.0, json sidecar)
+identity_db_decisions.json

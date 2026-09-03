@@ -55,6 +55,8 @@ class IdentityManager:
         #     FurseeAdapter（worker boot + 模型加载约 13s，不应在
         #     import / 构造 / 处理普通图片时发生）
         #   - 可注入实例（测试用 fake adapter / 未来自定义配置）
+        # 疑似同一角色（第二阶段）：人工决策/合并快照的 JSON sidecar 存储
+        self._suspect_store_obj = None
         self._fursee_adapter = fursee_adapter
         self._fursee_failures = 0      # 连续失败计数（成功一次即清零）
         self._fursee_fuse_open = False # 熔断状态（批作用域，见 analyze_folder）
@@ -306,8 +308,236 @@ class IdentityManager:
         self.db.update_group(character_id, name=name)
 
     def merge_groups(self, target_id, source_ids):
-        """检测级安全合并角色组，保留全部 detection 元数据。"""
-        return self.db.merge_group_members(target_id, source_ids)
+        """检测级安全合并角色组，保留全部 detection 元数据。
+
+        角色中心 2.0 · 第二阶段：合并前先记录快照（单槽，供
+        「撤销最近一次合并」），合并成功后再写入决策 sidecar：
+        - 清理涉及被合并源组的旧"不是同一角色"判定（源组已不存在）
+        - 显式合并覆盖该组对旧判定（人工意愿优先，撤销后可重新推荐）
+        快照/决策写失败只打印日志，**不阻断合并**（DB 合并已先行提交）。
+        """
+        snapshot = self._capture_merge_snapshot(target_id, source_ids)
+        result = self.db.merge_group_members(target_id, source_ids)
+        self._commit_merge_snapshot(target_id, source_ids, snapshot)
+        return result
+
+    # ============================================================
+    # 疑似同一角色（角色中心 2.0 · 第二阶段）
+    # 候选生成 / 人工决策 / 撤销最近合并 —— 全部走 Manager/Store，
+    # UI 不做业务逻辑（铁律 7）。
+    # ============================================================
+
+    def _suspect_store(self):
+        """决策 sidecar（懒加载；路径 = 数据库同目录 *_decisions.json）。"""
+        if self._suspect_store_obj is None:
+            from core.identity.suspects import SuspectStore
+            self._suspect_store_obj = SuspectStore(
+                SuspectStore.default_path(self.db.db_path)
+            )
+        return self._suspect_store_obj
+
+    def get_suspect_candidates(self, min_sim=None, limit=None):
+        """跨 Fursee 角色组相似候选（纯只读，不触发任何聚类/写库）。
+
+        只考虑含 fursuit_fursee 成员的角色组（fursuit_visual 旧数据
+        冻结、face 人脸组均不参与）；组代表口径与 incremental_assign
+        完全一致（mean → L2 归一化），Fursee 0.79 / eps 0.6481 不受影响。
+
+        返回: [{"group_a": get_groups 风格 dict, "group_b": ...,
+                "similarity": float}, ...] 按相似度降序。
+        """
+        if min_sim is None:
+            from core.identity.suspects import DEFAULT_MIN_SIM
+            min_sim = DEFAULT_MIN_SIM
+        if limit is None:
+            from core.identity.suspects import DEFAULT_LIMIT
+            limit = DEFAULT_LIMIT
+
+        groups = [
+            g for g in self.get_groups("all")
+            if "fursuit_fursee" in (g.get("source_types") or [])
+            and (g.get("character_id") or "")
+        ]
+        if len(groups) < 2:
+            return []
+        by_id = {g["character_id"]: g for g in groups}
+
+        rows = self.db.get_all_embeddings(
+            embedding_type="fursuit_fursee", include_detection_index=True
+        )
+        acc = {}
+        for _path, _det, emb, _etype, gid in rows:
+            if gid and gid in by_id:
+                acc.setdefault(gid, []).append(emb)
+
+        from core.identity.suspects import (
+            compute_suspect_pairs,
+            group_representatives,
+        )
+        reps = group_representatives(acc)
+        excluded = self._suspect_store().not_same_pairs()
+        pairs = compute_suspect_pairs(
+            reps, excluded=excluded, min_sim=min_sim, limit=limit
+        )
+        return [
+            {"group_a": by_id[a], "group_b": by_id[b], "similarity": sim}
+            for a, b, sim in pairs
+        ]
+
+    def mark_not_same(self, group_id_a, group_id_b):
+        """记录一对角色"不是同一角色"（候选不再推荐该组对）。
+
+        决策持久化在 JSON sidecar（不改 schema）。组不存在/自合并抛
+        ValueError。返回 True（新记录）或 False（已存在，幂等）。
+        """
+        a_id = str(group_id_a or "").strip()
+        b_id = str(group_id_b or "").strip()
+        if not a_id or not b_id:
+            raise ValueError("角色组 ID 不能为空")
+        if a_id == b_id:
+            raise ValueError("不能对同一角色组做\"不是同一角色\"判定")
+        for gid in (a_id, b_id):
+            if self.db.get_group(gid) is None:
+                raise ValueError(f"角色组不存在：{gid}")
+        return self._suspect_store().add_not_same(a_id, b_id)
+
+    def can_undo_last_merge(self):
+        """是否存在可撤销的最近一次合并（目标组必须仍存在）。"""
+        rec = self._suspect_store().last_merge()
+        if not rec or not rec.get("target_id"):
+            return False
+        return self.db.get_group(rec["target_id"]) is not None
+
+    def undo_last_merge(self):
+        """撤销最近一次角色合并（单槽：只保留最近一次，无多级撤销）。
+
+        恢复方式（不重跑聚类、不重算 embedding）：
+        - 按快照里记录的 identity_image.id 把成员行 UPDATE 回各自源组
+          （只影响本合并搬动的行；同图多 detection 的复合键原样保留）
+        - 重建被删的 identity_group 行（原 id/名称/类别/封面等元数据）
+        - 恢复目标组合并前的封面
+        成功后清空撤销记录。返回:
+            {"ok": True, "target_id":..., "restored_groups":[...],
+             "restored_members": n}
+            或 {"ok": False, "reason": "no_record"|"target_gone"}
+        """
+        from datetime import datetime
+        store = self._suspect_store()
+        rec = store.last_merge()
+        if not rec:
+            return {"ok": False, "reason": "no_record"}
+        target_id = str(rec.get("target_id") or "")
+        target = self.db.get_group(target_id) if target_id else None
+        if target is None:
+            return {"ok": False, "reason": "target_gone"}
+
+        restored_groups = []
+        restored_members = 0
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        conn = self.db.conn
+        with conn:
+            for src in rec.get("sources") or []:
+                meta = src.get("group") or {}
+                gid = str(meta.get("id") or "")
+                mids = [int(x) for x in (src.get("member_ids") or [])
+                        if str(x).lstrip("-").isdigit()]
+                if not gid or not mids:
+                    continue
+                placeholders = ",".join("?" for _ in mids)
+                cur = conn.execute(
+                    f"UPDATE identity_image SET group_id = ? "
+                    f"WHERE id IN ({placeholders}) AND group_id = ?",
+                    [gid, *mids, target_id],
+                )
+                count = cur.rowcount
+                if count > 0:
+                    # 重建源组行（id 不变 → character_id 规则不变）；
+                    # 元数据用合并前快照，人工重命名/封面不丢失
+                    conn.execute(
+                        "INSERT OR IGNORE INTO identity_group "
+                        "(id, name, type, description, cover_image,"
+                        " created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (gid, meta.get("name", ""), meta.get("type", ""),
+                         meta.get("description", ""), meta.get("cover_image", ""),
+                         meta.get("created_at", ""), meta.get("updated_at", "")),
+                    )
+                    restored_groups.append({"group_id": gid, "members": count})
+                    restored_members += count
+            # 恢复目标组合并前的封面
+            conn.execute(
+                "UPDATE identity_group SET cover_image = ?, updated_at = ? "
+                "WHERE id = ?",
+                (rec.get("target_cover_before") or "", now, target_id),
+            )
+        store.clear_last_merge()
+        return {
+            "ok": True,
+            "target_id": target_id,
+            "restored_groups": restored_groups,
+            "restored_members": restored_members,
+        }
+
+    # ---------- 合并快照（merge_groups 内部） ----------
+
+    def _capture_merge_snapshot(self, target_id, source_ids):
+        """合并前快照：每个源组的元数据 + 成员行 id（撤销的恢复依据）。
+
+        校验失败（目标组不存在等）返回 None —— DB 层 merge_group_members
+        会抛错，快照不会落盘。
+        """
+        target_id = str(target_id or "").strip()
+        source_ids = list(dict.fromkeys(
+            str(gid or "").strip() for gid in (source_ids or [])
+        ))
+        source_ids = [gid for gid in source_ids if gid and gid != target_id]
+        target = self.db.get_group(target_id) if target_id else None
+        if target is None:
+            return None
+        sources = []
+        for gid in source_ids:
+            group = self.db.get_group(gid)
+            if group is None:
+                continue  # 缺失源组由 DB 层合并校验抛错，快照不落盘
+            rows = self.db.get_images_by_group(gid) or []
+            sources.append({
+                "group": {
+                    "id": group.get("id", ""),
+                    "name": group.get("name", ""),
+                    "type": group.get("type", ""),
+                    "description": group.get("description", ""),
+                    "cover_image": group.get("cover_image", ""),
+                    "created_at": group.get("created_at", ""),
+                    "updated_at": group.get("updated_at", ""),
+                },
+                "member_ids": [int(r["id"]) for r in rows if r and r.get("id")],
+            })
+        from datetime import datetime
+        return {
+            "target_id": target_id,
+            "target_cover_before": target.get("cover_image", ""),
+            "sources": sources,
+            "merged_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+
+    def _commit_merge_snapshot(self, target_id, source_ids, snapshot):
+        """合并成功后落盘：清理失效判定 + 保存最近合并快照（单槽）。
+
+        只做决策文件维护；失败不阻断（DB 合并已完成）。
+        """
+        if snapshot is None:
+            return
+        try:
+            store = self._suspect_store()
+            # 源组已不存在 → 涉及它们的"不是同一角色"判定全部失效
+            store.remove_pairs_involving(source_ids)
+            # 显式合并覆盖该组对旧判定（人工意愿优先）
+            for gid in (source_ids or []):
+                if gid and gid != target_id:
+                    store.remove_pair(target_id, gid)
+            store.set_last_merge(snapshot)
+        except OSError as e:
+            print(f"[IdentityManager] 合并决策记录写入失败（可忽略，"
+                  f"仅影响撤销）：{e}")
 
     def analyze_new_photos(self, photos_dir=None, progress_callback=None):
         """增量分析：扫描 photos/ 中未入库照片，Fursee 入库 + 定向聚类。

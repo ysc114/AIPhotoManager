@@ -12,7 +12,7 @@ from pathlib import Path
 from PySide6.QtCore import Qt, QTimer, QRectF, QPointF, QSize, QPoint, QEvent, QRect, QThread
 from PySide6.QtGui import (
     QPixmap, QColor, QFont, QPainter, QImage, QPen,
-    QImageReader, QImageIOHandler,
+    QImageReader, QImageIOHandler, QFontMetrics,
 )
 from PySide6.QtWidgets import (
     QLabel, QWidget, QFrame, QPushButton, QGridLayout, QVBoxLayout,
@@ -214,6 +214,84 @@ class _RoleCenterMixinMixin:
 
         page_stack.addWidget(wall_view)
 
+        # ===== [2] ✨ 疑似同一角色（角色中心 2.0 · 第二阶段）=====
+        # 仅「全部角色」页开放：跨 Fursee 角色组相似候选 + 人工确认合并。
+        # 纯视觉/交互层 —— 候选生成、决策记录、合并/撤销全部走 IdentityManager。
+        suspects_ui = None
+        if page_key == "character":
+            suspects_view = QWidget()
+            sv_layout = QVBoxLayout(suspects_view)
+            sv_layout.setContentsMargins(0, 0, 0, 0)
+            sv_layout.setSpacing(14)
+
+            sv_top = QHBoxLayout()
+            sv_top.setSpacing(12)
+            sv_back = QPushButton("← 返回角色列表")
+            sv_back.setStyleSheet(
+                "QPushButton{background:rgba(255,255,255,0.6);color:#3a5a7a;"
+                "border:1px solid rgba(255,255,255,0.8);"
+                "padding:6px 16px;border-radius:15px;font-size:12px;font-weight:600;}"
+                "QPushButton:hover{background:rgba(255,255,255,0.9);}"
+            )
+            sv_top.addWidget(sv_back)
+            sv_title = QLabel("✨ 疑似同一角色")
+            sv_title.setStyleSheet(
+                "font-size:19px;font-weight:800;color:#1f2d3d;background:transparent;border:none;"
+            )
+            sv_top.addWidget(sv_title)
+            sv_hint = QLabel("相似度较高的不同角色组 · 人工确认后才合并 · 不改动 Fursee 分组")
+            sv_hint.setStyleSheet("font-size:12px;color:#8a97a8;background:transparent;border:none;")
+            sv_top.addWidget(sv_hint)
+            sv_top.addStretch(1)
+            sv_count = QLabel("候选 0")
+            sv_count.setStyleSheet(
+                "font-size:12px;color:#5b7bd5;font-weight:700;"
+                "background:rgba(255,255,255,0.5);border-radius:9px;padding:2px 10px;"
+                "border:1px solid rgba(255,255,255,0.6);"
+            )
+            sv_top.addWidget(sv_count)
+            sv_recount = GlassButton("🔄 重新计算", variant="normal")
+            sv_top.addWidget(sv_recount)
+            sv_undo = GlassButton("↩️ 撤销最近合并", variant="normal")
+            sv_undo.setToolTip(
+                "撤销最近一次角色合并（仅保留最近一次记录，无多级撤销）"
+            )
+            sv_top.addWidget(sv_undo)
+            sv_layout.addLayout(sv_top)
+
+            sv_scroll = QScrollArea()
+            sv_scroll.setWidgetResizable(True)
+            sv_scroll.setStyleSheet(
+                "QScrollArea{border:none;background:transparent;}"
+                "QScrollArea > QWidget > QWidget{background:transparent;}"
+            )
+            sv_container = QWidget()
+            sv_cards = QVBoxLayout(sv_container)
+            sv_cards.setSpacing(12)
+            sv_cards.setContentsMargins(0, 0, 0, 0)
+            sv_cards.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+            sv_scroll.setWidget(sv_container)
+            sv_layout.addWidget(sv_scroll, 1)
+
+            sv_empty = QLabel("正在计算候选…")
+            sv_empty.setAlignment(Qt.AlignCenter)
+            sv_empty.setStyleSheet(
+                "font-size:14px;color:#a5b2c2;padding:50px;background:transparent;border:none;"
+            )
+            sv_empty.hide()
+            sv_layout.addWidget(sv_empty)
+
+            page_stack.addWidget(suspects_view)
+            suspects_ui = {
+                "view": suspects_view,
+                "back": sv_back,
+                "count": sv_count,
+                "recount": sv_recount,
+                "undo": sv_undo,
+                "empty": sv_empty,
+                "cards_layout": sv_cards,
+            }
+
         page_stack.setCurrentIndex(0)
         page_layout.addWidget(page_stack, 1)
 
@@ -244,6 +322,17 @@ class _RoleCenterMixinMixin:
             "groups": [],
             "pq_worker": None,
         }
+
+        # 疑似同一角色页（仅角色中心）：挂载控件 + 事件
+        if suspects_ui is not None:
+            st = self._group_pages[page_key]
+            st["suspects_ui"] = suspects_ui
+            suspects_ui["back"].clicked.connect(
+                lambda _, s=st: s["page_stack"].setCurrentIndex(0))
+            suspects_ui["recount"].clicked.connect(
+                lambda _, k=page_key: self._refresh_suspects(k))
+            suspects_ui["undo"].clicked.connect(
+                lambda _, k=page_key: self._undo_last_suspect_merge(k))
 
         refresh_btn.clicked.connect(lambda _, k=page_key: self._load_groups_into_page(k))
         analyze_btn.clicked.connect(lambda _, k=page_key: self._analyze_new_photos(k))
@@ -799,10 +888,18 @@ class _RoleCenterMixinMixin:
         counter = QLabel("")
         counter.setStyleSheet("font-size:11.5px;color:#8a97a8;background:transparent;border:none;")
         lay.addWidget(counter)
+
+        # ✨ 疑似同一角色入口（角色中心 2.0 · 第二阶段）
+        suspects_btn = GlassButton("✨ 疑似同一角色", variant="accent")
+        suspects_btn.setToolTip(
+            "跨角色组相似候选 · 人工确认后才合并\n"
+            "不修改 Fursee 0.79 / eps 0.6481，不重跑聚类"
+        )
+        lay.addWidget(suspects_btn)
         lay.addStretch(1)
 
         # state 在页面构建末尾才建立 → 控件暂存 self，加载时挂载到 state
-        self._char_toolbar_controls = (edit, type_combo, sort_combo, counter)
+        self._char_toolbar_controls = (edit, type_combo, sort_combo, counter, suspects_btn)
         return bar
 
 
@@ -935,7 +1032,11 @@ class _RoleCenterMixinMixin:
             c = getattr(self, "_char_toolbar_controls", None)
             if c:
                 state["filter_edit"], state["filter_type"], \
-                    state["filter_sort"], state["filter_counter"] = c
+                    state["filter_sort"], state["filter_counter"], \
+                    state["suspects_btn"] = c
+                state["suspects_btn"].clicked.connect(
+                    lambda _, k=page_key: self._open_suspects_view(k)
+                )
         group_type_filter = state["group_type_filter"]
         default_prefix = state["default_prefix"]
 
@@ -1543,4 +1644,410 @@ class _RoleCenterMixinMixin:
             w = item.widget()
             if w:
                 w.deleteLater()
+
+    # --------------------------------------------------------
+    # ✨ 疑似同一角色（角色中心 2.0 · 第二阶段）
+    # 候选生成/决策/合并/撤销全部走 core.identity（Manager），UI 只做展示。
+    # 不触碰 Fursee 0.79 / eps 0.6481 / DBSCAN；决策落在 JSON sidecar。
+    # --------------------------------------------------------
+
+    @staticmethod
+    def _suspect_display_name(group):
+        """候选里角色的显示名：用户命名优先，否则稳定占位名。"""
+        gid = str(group.get("character_id") or "")
+        name = (group.get("name") or "").strip()
+        return name or f"未命名角色 #{gid[:8]}"
+
+    def _open_suspects_view(self, page_key):
+        """工具栏「✨ 疑似同一角色」→ 进入候选视图并刷新。"""
+        state = self._group_pages.get(page_key)
+        if state is None or not state.get("suspects_ui"):
+            return
+        state["page_stack"].setCurrentIndex(2)
+        self._refresh_suspects(page_key)
+
+    def _refresh_suspects(self, page_key):
+        """重新计算并渲染疑似同一角色候选（只读 + 决策文件读取）。"""
+        state = self._group_pages.get(page_key)
+        if state is None or not state.get("suspects_ui"):
+            return
+        ui = state["suspects_ui"]
+        candidates = []
+        can_undo = False
+        try:
+            from core.identity import IdentityManager
+            mgr = IdentityManager()
+            try:
+                candidates = mgr.get_suspect_candidates() or []
+                can_undo = bool(mgr.can_undo_last_merge())
+            finally:
+                mgr.close()
+        except Exception as e:
+            print(f"[疑似同一角色] 候选加载失败: {e}")
+            self._clear_grid(ui["cards_layout"])
+            ui["empty"].setText(f"候选加载失败：{e}")
+            ui["empty"].show()
+            ui["undo"].setEnabled(False)
+            ui["count"].setText("候选 0")
+            return
+
+        self._clear_grid(ui["cards_layout"])
+        ui["undo"].setEnabled(can_undo)
+        if not candidates:
+            ui["count"].setText("候选 0")
+            ui["empty"].setText(
+                "暂无疑似同一角色候选\n"
+                "可先「分析新照片」增加素材，或稍后点「重新计算」"
+            )
+            ui["empty"].show()
+            return
+        ui["empty"].hide()
+        max_show = 60
+        shown = candidates[:max_show]
+        ui["count"].setText(
+            f"候选 {len(candidates)}"
+            + (f" · 显示前 {max_show}" if len(candidates) > max_show else "")
+        )
+        for cand in shown:
+            try:
+                card = self._build_suspect_card(page_key, cand)
+            except Exception as e:
+                print(f"[疑似同一角色] 卡片渲染失败: {e}")
+                continue
+            ui["cards_layout"].addWidget(card)
+
+    def _build_suspect_card(self, page_key, cand):
+        """单个候选卡：双方封面/名称/类别/张数 + 相似度 + 是/否按钮。
+
+        风格与角色卡片一致（Aurora 玻璃卡 + 柔和阴影）；候选本身不含
+        任何写操作 —— 点「是同一角色」前必须经过 QMessageBox 人工确认。
+        """
+        g_a = cand.get("group_a") or {}
+        g_b = cand.get("group_b") or {}
+        sim = float(cand.get("similarity") or 0.0)
+
+        card = AuroraGlassCard(refract=False)
+        card.setFixedHeight(214)
+        self._glass_shadow(card, blur=20, dy=4, alpha=38)
+
+        hl = QHBoxLayout(card)
+        hl.setContentsMargins(16, 12, 16, 12)
+        hl.setSpacing(14)
+
+        hl.addWidget(self._build_suspect_char_block(g_a))
+        hl.addWidget(self._build_suspect_sim_col(sim))
+        hl.addWidget(self._build_suspect_char_block(g_b))
+
+        btn_col = QVBoxLayout()
+        btn_col.setSpacing(8)
+        btn_yes = GlassButton("✓ 是同一角色", variant="success")
+        btn_yes.setFixedSize(176, 38)
+        btn_no = GlassButton("× 不是同一角色", variant="normal")
+        btn_no.setFixedSize(176, 38)
+        btn_hint = QLabel("确认后即合并（保留全部检测数据）\n可「撤销最近一次合并」")
+        btn_hint.setAlignment(Qt.AlignCenter)
+        btn_hint.setWordWrap(True)
+        btn_hint.setStyleSheet(
+            "font-size:9.5px;color:#9aa6b8;background:transparent;border:none;"
+        )
+        btn_col.addWidget(btn_yes, 0, Qt.AlignCenter)
+        btn_col.addWidget(btn_no, 0, Qt.AlignCenter)
+        btn_col.addWidget(btn_hint, 0, Qt.AlignCenter)
+        btn_col.addStretch(1)
+        btn_yes.clicked.connect(
+            lambda _, k=page_key, c=cand: self._on_suspect_same(k, c))
+        btn_no.clicked.connect(
+            lambda _, k=page_key, c=cand: self._on_suspect_not_same(k, c))
+        hl.addLayout(btn_col, 0)
+        return card
+
+    def _build_suspect_char_block(self, group):
+        """候选卡单侧角色块：封面（detection 裁剪）+ 名称 + 类别 + 张数。"""
+        block = QWidget()
+        block.setFixedWidth(236)
+        bl = QVBoxLayout(block)
+        bl.setContentsMargins(0, 0, 0, 0)
+        bl.setSpacing(3)
+
+        cover_size = 124
+        cover_label = QLabel()
+        cover_label.setFixedSize(cover_size, cover_size)
+        cover_label.setAlignment(Qt.AlignCenter)
+        cover_label.setStyleSheet(
+            "background:rgba(240,244,250,0.45);border-radius:14px;border:none;"
+        )
+        cover_path = group.get("cover_image") or (group.get("images") or [""])[0]
+        cover_det = None
+        cover_candidates = [
+            det for det in (group.get("detections") or [])
+            if det and det.get("image_path") == cover_path
+        ]
+        if cover_candidates:
+            cover_det = max(
+                cover_candidates,
+                key=lambda det: (
+                    float(det.get("confidence") or 0.0),
+                    -(int(det.get("detection_index") or 0)),
+                ),
+            )
+        shown = False
+        cover_local = self._resolve_display_path(cover_path)
+        bbox_json = cover_det.get("bbox") if cover_det else None
+        if cover_local and self._thumb_cache.enabled:
+            try:
+                cp = self._thumb_cache.get_cached(cover_local, 256, bbox_json)
+                if cp:
+                    pix = QPixmap(cp)
+                    if not pix.isNull():
+                        cover_label.setPixmap(
+                            self._square_cover_pixmap(pix, cover_size)
+                        )
+                        shown = True
+                if not shown:
+                    self._thumb_cache.request(
+                        cover_local, 256, bbox_json,
+                        on_ready=lambda cpath, lab=cover_label, sz=cover_size:
+                            self._suspect_cover_ready(lab, cpath, sz),
+                    )
+            except Exception as e:
+                print(f"[疑似同一角色] 封面缓存 {cover_path}: {e}")
+        if not shown:
+            cover_label.setText("…")
+            cover_label.setStyleSheet(
+                "background:rgba(240,244,250,0.55);border-radius:14px;"
+                "color:#b9c4d2;font-size:12px;border:none;"
+            )
+        bl.addWidget(cover_label, 0, Qt.AlignHCenter)
+
+        name_text = self._suspect_display_name(group)
+        fm = QFontMetrics(cover_label.font())
+        name_label = QLabel(fm.elidedText(name_text, Qt.ElideRight, 226))
+        name_label.setFixedHeight(18)
+        name_label.setAlignment(Qt.AlignCenter)
+        name_label.setToolTip(name_text)
+        name_label.setStyleSheet(
+            "font-size:13.5px;font-weight:700;color:#1f2d3d;"
+            "background:transparent;border:none;"
+        )
+        bl.addWidget(name_label)
+
+        category_text = self._format_group_category(group)
+        if category_text:
+            cat_label = QLabel(category_text)
+            cat_label.setStyleSheet(
+                "font-size:10px;color:#5b7bd5;font-weight:700;"
+                "background:rgba(120,150,255,0.14);border-radius:8px;"
+                "padding:1px 8px;border:none;"
+            )
+            bl.addWidget(cat_label, 0, Qt.AlignHCenter)
+
+        count_label = QLabel(f"{self._unique_photo_count(group)} 张照片")
+        count_label.setStyleSheet(
+            "font-size:11px;color:#8a97a8;background:transparent;border:none;"
+        )
+        bl.addWidget(count_label, 0, Qt.AlignHCenter)
+        bl.addStretch(1)
+        return block
+
+    @staticmethod
+    def _square_cover_pixmap(pix, size):
+        """等比撑满后居中裁成正方形（封面统一 1:1，与角色卡片视觉一致）。"""
+        if pix.isNull():
+            return pix
+        scaled = pix.scaled(
+            size, size, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
+        )
+        if scaled.width() == size and scaled.height() == size:
+            return scaled
+        x = (scaled.width() - size) // 2
+        y = (scaled.height() - size) // 2
+        return scaled.copy(x, y, size, size)
+
+    def _suspect_cover_ready(self, label, cache_path, size):
+        """缩略图后台生成完成 → 主线程刷新候选封面（失败静默保持占位）。"""
+        if not cache_path or label.parent() is None:
+            return
+        try:
+            pix = QPixmap(cache_path)
+            if pix.isNull():
+                return
+            label.setPixmap(self._square_cover_pixmap(pix, size))
+        except Exception as e:
+            print(f"[疑似同一角色] 封面更新失败: {e}")
+
+    def _build_suspect_sim_col(self, sim):
+        """候选卡中间列：相似度数值 + 与 0.79 自动线的关系说明。"""
+        col = QWidget()
+        col.setFixedWidth(128)
+        cl = QVBoxLayout(col)
+        cl.setContentsMargins(0, 6, 0, 6)
+        cl.setSpacing(3)
+
+        cap = QLabel("相似度")
+        cap.setAlignment(Qt.AlignCenter)
+        cap.setStyleSheet(
+            "font-size:11px;color:#8a97a8;background:transparent;border:none;"
+        )
+        cl.addWidget(cap)
+
+        pct = QLabel(f"{sim * 100:.1f}%")
+        pct.setAlignment(Qt.AlignCenter)
+        pct.setStyleSheet(
+            "font-size:23px;font-weight:800;color:%s;"
+            "background:transparent;border:none;" % (
+                "#e8964f" if sim >= 0.70 else "#5b7bd5"
+            )
+        )
+        cl.addWidget(pct)
+
+        if sim >= 0.79:
+            tag_text = "已达 0.79 合并线"
+            tag_color = "#e8964f"
+        else:
+            tag_text = "低于 0.79 自动线"
+            tag_color = "#8a97a8"
+        tag = QLabel(tag_text)
+        tag.setAlignment(Qt.AlignCenter)
+        tag.setStyleSheet(
+            "font-size:9.5px;font-weight:700;color:%s;"
+            "background:transparent;border:none;" % tag_color
+        )
+        cl.addWidget(tag)
+
+        note = QLabel("候选仅供人工\n判断与确认")
+        note.setAlignment(Qt.AlignCenter)
+        note.setWordWrap(True)
+        note.setStyleSheet(
+            "font-size:9.5px;color:#a5b2c2;background:transparent;border:none;"
+        )
+        cl.addWidget(note)
+        cl.addStretch(1)
+        return col
+
+    def _on_suspect_same(self, page_key, cand):
+        """✓ 是同一角色：人工确认后走现有合并机制（merge_groups → DB
+        merge_group_members），不重跑 Fursee、不重聚类；Manager 在合并前
+        已记录快照，本页「撤销最近合并」可恢复。
+        """
+        g_a = cand.get("group_a") or {}
+        g_b = cand.get("group_b") or {}
+        a_id = str(g_a.get("character_id") or "")
+        b_id = str(g_b.get("character_id") or "")
+        if not a_id or not b_id or a_id == b_id:
+            return
+        name_a = self._suspect_display_name(g_a)
+        name_b = self._suspect_display_name(g_b)
+        sim = float(cand.get("similarity") or 0.0)
+        confirm = QMessageBox.question(
+            self,
+            "确认是同一角色",
+            f"「{name_a}」与「{name_b}」的相似度为 {sim * 100:.1f}%，\n"
+            "确认是同一角色并合并？\n\n"
+            "· 保留双方全部照片、同框多角色 detection、裁剪框与特征数据\n"
+            "· 不修改 Fursee 聚类阈值，不重跑聚类\n"
+            "· 合并后可在本页「撤销最近合并」恢复",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if confirm != QMessageBox.Yes:
+            return
+        try:
+            from core.identity import IdentityManager
+            from core.identity.suspects import pick_merge_direction
+            target, source = pick_merge_direction(g_a, g_b, count_key="count")
+            mgr = IdentityManager()
+            try:
+                result = mgr.merge_groups(
+                    str(target.get("character_id") or ""),
+                    [str(source.get("character_id") or "")],
+                )
+            finally:
+                mgr.close()
+        except Exception as e:
+            QMessageBox.critical(self, "合并失败", f"角色组合并失败：{e}")
+            return
+        toast.show(
+            self,
+            f"已合并「{self._suspect_display_name(source)}」→"
+            f"「{self._suspect_display_name(target)}」"
+            f"（{result.get('moved', 0)} 条记录）· 可撤销",
+            kind="success",
+        )
+        self.statusBar().showMessage(
+            f"已合并角色组：{result.get('target_id', '')} ← "
+            f"{len(result.get('source_ids', []))} 组 · "
+            f"{result.get('moved', 0)} 条 detection"
+        )
+        self._reload_after_suspect_action(page_key)
+
+    def _on_suspect_not_same(self, page_key, cand):
+        """× 不是同一角色：记录人工判定，该组对不再出现在候选里。
+
+        决策写入数据库旁的 JSON sidecar（不改 schema）；之后即使重新
+        计算候选也不会再推荐这对。
+        """
+        g_a = cand.get("group_a") or {}
+        g_b = cand.get("group_b") or {}
+        a_id = str(g_a.get("character_id") or "")
+        b_id = str(g_b.get("character_id") or "")
+        try:
+            from core.identity import IdentityManager
+            mgr = IdentityManager()
+            try:
+                mgr.mark_not_same(a_id, b_id)
+            finally:
+                mgr.close()
+        except Exception as e:
+            QMessageBox.critical(self, "记录失败", f"无法记录判定：{e}")
+            return
+        toast.show(
+            self,
+            f"已记录：不是同一角色（「{self._suspect_display_name(g_a)}」×"
+            f"「{self._suspect_display_name(g_b)}」不再推荐）",
+            kind="info",
+        )
+        self._refresh_suspects(page_key)
+
+    def _reload_after_suspect_action(self, page_key):
+        """合并/撤销后：角色网格数据失效重载 + 候选重算（停留当前视图）。"""
+        state = self._group_pages.get(page_key)
+        if state is None:
+            return
+        self._load_groups_into_page(page_key)
+        self._refresh_suspects(page_key)
+
+    def _undo_last_suspect_merge(self, page_key):
+        """↩️ 撤销最近一次合并（单槽：只撤销最近一次，无多级系统）。"""
+        try:
+            from core.identity import IdentityManager
+            mgr = IdentityManager()
+            try:
+                result = mgr.undo_last_merge()
+            finally:
+                mgr.close()
+        except Exception as e:
+            QMessageBox.critical(self, "撤销失败", f"撤销最近一次合并失败：{e}")
+            return
+        if not result or not result.get("ok"):
+            reason = (
+                "当前没有可撤销的最近合并"
+                if (not result or result.get("reason") == "no_record")
+                else "最近一次合并的目标角色组已不存在，无法撤销"
+            )
+            toast.show(self, reason, kind="warning")
+            self._refresh_suspects(page_key)
+            return
+        n_groups = len(result.get("restored_groups") or [])
+        n_members = result.get("restored_members", 0)
+        toast.show(
+            self,
+            f"已撤销最近一次合并：恢复 {n_groups} 个角色组 · "
+            f"{n_members} 条照片记录",
+            kind="success",
+        )
+        self.statusBar().showMessage(
+            f"已撤销合并（{result.get('target_id', '')}），"
+            f"恢复 {n_groups} 个角色组"
+        )
+        self._reload_after_suspect_action(page_key)
 

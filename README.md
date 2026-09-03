@@ -31,6 +31,7 @@ AI 照片管理系统：本地 + NAS 照片管理，AI 自动分类、兽装/人
 - **角色分组**：DBSCAN 聚类 + **Incremental Assignment 增量分配**（新照片只加入/新建，不拆散已有组）
 - **多人合照归属**：同一照片多个 detection 各自独立归组（`(image_path, detection_index)` 复合键）
 - **人工合并角色**：UI 一键合并，永久保留（不因后续聚类被拆散）
+- **疑似同一角色**（角色中心 2.0 · 第二阶段）：跨 Fursee 组相似候选（只读比较，不改 0.79/eps）→ 人工确认才合并；"不是同一角色"判定与最近合并快照存 JSON sidecar（不改 schema），支持撤销最近一次合并
 - **角色照片墙**：组内按 `(path, det_idx)` 去重，bbox 主体裁剪作为卡片封面
 - **缩略图优化**：`QImageReader.setClipRect` 先裁后缩 + EXIF 旋转映射，小主体不再模糊
 
@@ -263,6 +264,8 @@ QT_QPA_PLATFORM=offscreen C:/Program Files/Python310/python.exe -m unittest disc
 | `test_no_full_recluster.py` | run(None) 抛错 / 定向 run / analyze_folder 不拆组 / 幂等 / face 增量 |
 | `test_detection_aware_identity.py` | merge 保留字段 / schema v2 / Legacy-Fursee 隔离 |
 | `test_detection_aware_ui.py` | 照片墙复合键 / bbox 裁剪渲染（offscreen）|
+| `test_suspect_pairs.py` | 疑似同一角色：候选生成（只读不重聚）/ 不是同一角色持久化 / 合并保真 / 撤销最近合并（temp 库）|
+| `test_suspects_ui.py` | 疑似同一角色 GUI 冒烟（offscreen，只读）|
 | `test_legacy_visibility.py` | get_groups 过滤（连接生产库，慎跑）|
 | `test_ai_classifier_cache.py` | 缓存命中（None/{}→重分析，有效→命中）|
 
