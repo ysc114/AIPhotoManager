@@ -1017,19 +1017,26 @@ class _RoleCenterMixinMixin:
             state["stats_label"].setText("共 0 个角色")
             return
 
-        cols = max(3, self.width() // (226 + 14))
-        for i, group in enumerate(groups):
-            display_name = (group.get("name") or
-                            f"{state['default_prefix']} {str(group.get('character_id') or '')[:10]}")
-            card = self._render_group_card(group, display_name, "character")
-            r, c = divmod(i, cols)
-            state["grid_layout"].addWidget(card, r, c)
-
         state["filter_counter"].setText(
             "%d / %d 个角色" % (len(groups), len(state.get("groups") or [])))
         total_photos = sum(int(g.get("count") or 0) for g in groups)
         state["stats_label"].setText(
             f"共 {len(groups)} 个角色 · {total_photos} 张照片")
+
+        # 卡片刻牌批量化构建（复用 _append_group_cards 分批管线）：
+        # 搜索/筛选每次按键不再同步重建全部 226 张卡（此前是逐键卡顿源），
+        # 改为每帧最多 12 张；快速连续输入时旧 token 自动作废不重复渲染。
+        cols = max(3, self.width() // (226 + 14))
+        items = []
+        for i, group in enumerate(groups):
+            display_name = (group.get("name") or
+                            f"{state['default_prefix']} {str(group.get('character_id') or '')[:10]}")
+            items.append((i, group, display_name))
+        token = object()
+        self._group_page_pending["character"] = {
+            "items": items, "index": 0, "cols": cols, "token": token,
+        }
+        self._append_group_cards("character", token=token)
 
 
     def _load_groups_into_page(self, page_key):

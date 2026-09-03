@@ -32,6 +32,11 @@ from PySide6.QtGui import QImageReader, QImageWriter, QImageIOHandler
 # ── 支持的长边尺寸 ──────────────────────────────────────────
 SUPPORTED_SIZES = (256, 512)
 
+# 后台生成线程数：串行单线程在 226 张卡首次进入时会长时间占满一颗
+# CPU（解码 + WebP 编码全是 CPU 密集），小机直接拖慢全局；
+# 2 线程在保留低占用（不抢满多核）的同时把等待时间砍半。
+_WORKER_COUNT = 2
+
 # 模块级缓存目录（相对项目根；项目根通过本文件定位）
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_CACHE_DIR = _PROJECT_ROOT / "cache" / "thumbnails"
@@ -137,9 +142,12 @@ class ThumbnailCache(QObject):
         self._md5_cache = {}          # path -> (mtime_ns, size, md5)
         self._pending = {}            # (path, size, bbox) -> [callback, ...]
         self._inflight = set()        # (path, size, bbox) 去重（合并重复请求）
-        self._worker = _ThumbnailWorker(self, self._q)
-        self._worker.daemon = True
-        self._worker.start()
+        self._workers = []
+        for _ in range(_WORKER_COUNT):
+            w = _ThumbnailWorker(self, self._q)
+            w.daemon = True
+            w.start()
+            self._workers.append(w)
         self.ready.connect(self._on_ready)
         self.failed.connect(self._on_failed)
 
@@ -167,8 +175,9 @@ class ThumbnailCache(QObject):
 
     def shutdown(self):
         self.set_enabled(False)
-        self._worker.stop()
-        self._worker.wait(2000)
+        for w in self._workers:
+            w.stop()
+            w.wait(2000)
 
     # --------------------------------------------------------
     # 键与路径

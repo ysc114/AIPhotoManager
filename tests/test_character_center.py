@@ -201,11 +201,14 @@ class CharacterCenterTests(unittest.TestCase):
         btn = state.get("perf_btn")
         self.assertIsNotNone(btn, "工具栏应有「⚡ 性能模式」按钮")
         orig = bool(S.get("ui.perf_mode", False))
+        expected = not orig
         try:
             btn.click()
             settle(self.app, 20)
-            self.assertTrue(bool(S.get("ui.perf_mode", False)))
-            self.assertIn("✓", btn.text())
+            self.assertEqual(
+                bool(S.get("ui.perf_mode", False)), expected,
+                "点击后应切换为相反状态")
+            self.assertEqual("✓" in btn.text(), expected)
             cards = [
                 c for c, (pk, _g, _n) in self.win._card_group_map.items()
                 if pk == "character"
