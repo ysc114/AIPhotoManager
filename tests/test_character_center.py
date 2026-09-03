@@ -193,5 +193,34 @@ class CharacterCenterTests(unittest.TestCase):
         self.assertGreater(checked, 0)
 
 
+    # ── 渲染性能：性能模式（静态玻璃卡）──
+    def test_perf_mode_toggle_renders_static_cards(self):
+        """⚡ 性能模式开关：卡片走静态帧缓存渲染（无离屏层、无动画）。"""
+        from PySide6.QtCore import QSize
+        state = self.state
+        btn = state.get("perf_btn")
+        self.assertIsNotNone(btn, "工具栏应有「⚡ 性能模式」按钮")
+        orig = bool(S.get("ui.perf_mode", False))
+        try:
+            btn.click()
+            settle(self.app, 20)
+            self.assertTrue(bool(S.get("ui.perf_mode", False)))
+            self.assertIn("✓", btn.text())
+            cards = [
+                c for c, (pk, _g, _n) in self.win._card_group_map.items()
+                if pk == "character"
+            ]
+            self.assertGreater(len(cards), 0)
+            card = cards[0]
+            self.assertIsNotNone(card._cache, "静态帧应缓存成功")
+            self.assertEqual(card._cache.size(), QSize(card.width(), card.height()))
+            self.assertIsNone(card.graphicsEffect())
+        finally:
+            if bool(S.get("ui.perf_mode", False)) != orig:
+                btn.click()
+                settle(self.app, 10)
+            self.assertEqual(bool(S.get("ui.perf_mode", False)), orig)
+
+
 if __name__ == "__main__":
     unittest.main()

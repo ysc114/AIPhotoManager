@@ -896,10 +896,20 @@ class _RoleCenterMixinMixin:
             "不修改 Fursee 0.79 / eps 0.6481，不重跑聚类"
         )
         lay.addWidget(suspects_btn)
+
+        # ⚡ 渲染性能模式：一键关闭极光/折射/阴影（滚动/筛选更流畅）
+        perf_btn = GlassButton("⚡ 性能模式", variant="normal")
+        perf_btn.setToolTip(
+            "一键关闭极光/折射/阴影等动态渲染\n"
+            "开启后角色卡片变为静态玻璃卡，滚动/筛选更流畅（可随时关闭恢复）"
+        )
+        lay.addWidget(perf_btn)
         lay.addStretch(1)
 
         # state 在页面构建末尾才建立 → 控件暂存 self，加载时挂载到 state
-        self._char_toolbar_controls = (edit, type_combo, sort_combo, counter, suspects_btn)
+        self._char_toolbar_controls = (
+            edit, type_combo, sort_combo, counter, suspects_btn, perf_btn,
+        )
         return bar
 
 
@@ -973,11 +983,11 @@ class _RoleCenterMixinMixin:
                 or query in str(g.get("character_id") or "").lower()
             ]
 
-        # 排序
+        # 排序（count = 数据库路径数，避免主线程 MD5 读文件）
         if sort_key == "count_desc":
-            groups.sort(key=lambda g: self._unique_photo_count(g), reverse=True)
+            groups.sort(key=lambda g: int(g.get("count") or 0), reverse=True)
         elif sort_key == "count_asc":
-            groups.sort(key=lambda g: self._unique_photo_count(g))
+            groups.sort(key=lambda g: int(g.get("count") or 0))
         elif sort_key == "name_asc":
             groups.sort(key=lambda g: (str(g.get("name") or "").lower(),
                                        str(g.get("character_id") or "")))
@@ -1017,9 +1027,9 @@ class _RoleCenterMixinMixin:
 
         state["filter_counter"].setText(
             "%d / %d 个角色" % (len(groups), len(state.get("groups") or [])))
-        total_photos = sum(self._unique_photo_count(g) for g in groups)
+        total_photos = sum(int(g.get("count") or 0) for g in groups)
         state["stats_label"].setText(
-            f"共 {len(groups)} 个角色 · {total_photos} 张唯一照片")
+            f"共 {len(groups)} 个角色 · {total_photos} 张照片")
 
 
     def _load_groups_into_page(self, page_key):
@@ -1033,10 +1043,14 @@ class _RoleCenterMixinMixin:
             if c:
                 state["filter_edit"], state["filter_type"], \
                     state["filter_sort"], state["filter_counter"], \
-                    state["suspects_btn"] = c
+                    state["suspects_btn"], state["perf_btn"] = c
                 state["suspects_btn"].clicked.connect(
                     lambda _, k=page_key: self._open_suspects_view(k)
                 )
+                state["perf_btn"].clicked.connect(
+                    lambda _=None: self._toggle_perf_mode()
+                )
+                self._sync_perf_btn(state)
         group_type_filter = state["group_type_filter"]
         default_prefix = state["default_prefix"]
 
@@ -1073,7 +1087,7 @@ class _RoleCenterMixinMixin:
         # 角色中心：加载后重应用搜索/筛选/排序（保持当前工具栏状态）
         if page_key == "character" and state.get("filter_edit") is not None:
             self._apply_character_filters(force=True)
-        total_photos = sum(self._unique_photo_count(g) for g in groups)
+        total_photos = sum(int(g.get("count") or 0) for g in groups)
         state["stats_label"].setText(
             f"共 {len(groups)} 个角色组 · {total_photos} 张照片"
         )
@@ -1228,7 +1242,7 @@ class _RoleCenterMixinMixin:
         meta_row.addStretch()
         layout.addLayout(meta_row)
 
-        count = self._unique_photo_count(group)
+        count = int(group.get("count") or 0)
         count_label = QLabel(f"{count} 张照片")
         count_label.setStyleSheet(
             "font-size:12px;color:#5c6d81;background:transparent;border:none;"
@@ -1865,7 +1879,7 @@ class _RoleCenterMixinMixin:
             )
             bl.addWidget(cat_label, 0, Qt.AlignHCenter)
 
-        count_label = QLabel(f"{self._unique_photo_count(group)} 张照片")
+        count_label = QLabel(f"{int(group.get('count') or 0)} 张照片")
         count_label.setStyleSheet(
             "font-size:11px;color:#5c6d81;background:transparent;border:none;"
         )
@@ -2074,4 +2088,45 @@ class _RoleCenterMixinMixin:
             f"恢复 {n_groups} 个角色组"
         )
         self._reload_after_suspect_action(page_key)
+
+    # --------------------------------------------------------
+    # ⚡ 渲染性能模式（极光/折射/阴影一键关闭；ui.perf_mode 持久化）
+    # --------------------------------------------------------
+
+    def _sync_perf_btn(self, state):
+        """按当前设置同步按钮文字状态。"""
+        btn = state.get("perf_btn")
+        if btn is None:
+            return
+        on = bool(S.get("ui.perf_mode", False))
+        btn.setText("⚡ 性能模式 ✓" if on else "⚡ 性能模式")
+        btn.setToolTip(
+            "性能模式已开启：极光/折射/阴影已关闭，滚动更流畅\n"
+            "再次点击关闭恢复" if on else
+            "一键关闭极光/折射/阴影等动态渲染\n"
+            "开启后角色卡片变为静态玻璃卡，滚动/筛选更流畅（可随时关闭恢复）"
+        )
+
+    def _toggle_perf_mode(self):
+        """切换渲染性能模式：组件层直接跳过极光/折射/自绘阴影。"""
+        new = not bool(S.get("ui.perf_mode", False))
+        S.set("ui.perf_mode", new)
+        state = self._group_pages.get("character")
+        if state:
+            self._sync_perf_btn(state)
+        if new:
+            toast.show(
+                self,
+                "性能模式已开启：极光/折射/阴影已关闭，滚动更流畅",
+                kind="info",
+            )
+        else:
+            toast.show(self, "性能模式已关闭：恢复极光/玻璃效果", kind="success")
+        self.statusBar().showMessage(
+            "渲染性能模式：" + ("开（静态玻璃卡）" if new else "关（完整效果）")
+        )
+        # 重建已加载分组页（新卡片按新参数缓存渲染）
+        for k in ("fursuit", "person", "character"):
+            if self._group_page_loaded.get(k):
+                self._load_groups_into_page(k)
 

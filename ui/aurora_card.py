@@ -25,10 +25,11 @@ Aurora Glass Card（可复用极光玻璃组件）
 
 import math
 
-from PySide6.QtCore import Qt, QPointF, QRectF, QTimer, QPoint
+from PySide6.QtCore import Qt, QPointF, QRectF, QSize, QTimer, QPoint
 from PySide6.QtGui import (
     QPainter,
     QPainterPath,
+    QPixmap,
     QRadialGradient,
     QLinearGradient,
     QColor,
@@ -81,6 +82,10 @@ class AuroraGlassCard(QFrame):
         self._drift_t = 0.0                 # 内部流动相位
         self._glow_alpha = 0.0              # 当前光晕强度 0~1
 
+        # 静态帧缓存（非 hover 时整卡渲染结果直接 blit）
+        self._cache = None
+        self._cache_key = None
+
         self._timer = QTimer(self)
         self._timer.setInterval(16)
         self._timer.timeout.connect(self._tick)
@@ -96,6 +101,7 @@ class AuroraGlassCard(QFrame):
         # 参数变更自监听：修改极光/玻璃参数 → 立即刷新；销毁时注销（防泄漏）
         self._settings_cb = S.on_change("aurora", self._on_aurora_cfg)
         self._glass_cb = S.on_change("glass", self._on_glass_cfg)
+        self._ui_cb = S.on_change("ui", self._on_ui_changed)
         self.destroyed.connect(self._on_destroyed)
 
         if S.get("aurora.enabled", True):
@@ -107,7 +113,7 @@ class AuroraGlassCard(QFrame):
     def _cfg(self):
         """一次性读取全部极光参数（paint/tick 时调用，开销可忽略）。"""
         return dict(
-            enabled=bool(S.get("aurora.enabled", True)),
+            enabled=bool(S.get("aurora.enabled", True)) and not self._perf_mode(),
             intensity=float(S.get("aurora.intensity", 0.55)),
             speed=float(S.get("aurora.speed", 1.0)),
             blur=float(S.get("aurora.blur", 0.6)),
@@ -169,7 +175,9 @@ class AuroraGlassCard(QFrame):
         return self._pg_available
 
     def _glass_active(self):
-        """折射层是否应启用（装饰层 refract=False 时不启用）。"""
+        """折射层是否应启用（装饰层 refract=False 时不启用；性能模式禁用）。"""
+        if self._perf_mode():
+            return False
         if not self._refract_enabled:
             return False
         if not self._init_pg():
@@ -340,6 +348,13 @@ class AuroraGlassCard(QFrame):
     def _on_destroyed(self):
         S.off_change("aurora", self._settings_cb)
         S.off_change("glass", self._glass_cb)
+        S.off_change("ui", self._ui_cb)
+
+    def _on_ui_changed(self, key, value):
+        """ui.* 变化（如 perf_mode 一键开关）→ 作废静态缓存并重绘。"""
+        if key == "ui.perf_mode":
+            self._cache_key = None
+            self.update()
 
     # --------------------------------------------------------
     # 动画驱动
@@ -407,21 +422,72 @@ class AuroraGlassCard(QFrame):
         self.update()
 
     # --------------------------------------------------------
+    # 性能模式：一键忽略极光/折射/阴影等动态渲染（默认不开启）
+    # --------------------------------------------------------
+    def _perf_mode(self):
+        """ui.perf_mode=True → 跳过极光/折射/自绘阴影（普通玻璃静态卡）。"""
+        return bool(S.get("ui.perf_mode", False))
+
+    # --------------------------------------------------------
     # 绘制
     # --------------------------------------------------------
+    def _static_key(self):
+        """静态帧缓存键：尺寸 + 全部视觉参数（任一变化自动重建）。"""
+        cfg = self._cfg()
+        return (
+            self.width(), self.height(), cfg["corner_radius"],
+            bool(cfg["enabled"]), cfg["intensity"], cfg["opacity"],
+            cfg["blur"], cfg["radius"], cfg["color_mode"], cfg["light_count"],
+            cfg["glass_opacity"],
+            float(S.get("ui.shadow_strength", 40)),
+            float(S.get("ui.glass_blur", 30)) / 30.0,
+            self._perf_mode(),
+        )
+
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.Antialiasing, True)
         rect = self.rect()
         w, h = rect.width(), rect.height()
+        if w <= 0 or h <= 0:
+            p.end()
+            return
+
+        # ── 静态帧缓存：非 hover/非动画时整卡渲染结果缓存为 pixmap，
+        # 滚动/重绘/筛选重建直接 blit（226 张卡滚动几乎零绘制成本）──
+        if not self._hovering and not self._timer.isActive():
+            key = self._static_key()
+            if (self._cache_key == key and self._cache is not None
+                    and self._cache.size() == QSize(w, h)):
+                p.drawPixmap(0, 0, self._cache)
+                p.end()
+                return
+            pm = QPixmap(w, h)
+            pm.fill(Qt.transparent)
+            pp = QPainter(pm)
+            pp.setRenderHint(QPainter.Antialiasing, True)
+            self._paint_content(pp, QRectF(rect), w, h)
+            pp.end()
+            self._cache = pm
+            self._cache_key = key
+            p.drawPixmap(0, 0, pm)
+            p.end()
+            return
+
+        self._paint_content(p, QRectF(rect), w, h)
+        p.end()
+
+    def _paint_content(self, p, rect, w, h):
+        """卡片完整绘制（玻璃底 + 自绘投影 + 极光 + 高光 + 描边）。"""
         cfg = self._cfg()
         radius = max(4, cfg["corner_radius"])
+        perf = self._perf_mode()
 
         # ── 自绘柔和投影（静态；无 QGraphicsDropShadowEffect 离屏图层）──
         # 只随重绘绘制 3 层描边近似柔影，226 张卡也不产生离屏合成开销；
-        # ui.shadow_strength=0 → 零投影（设置中心可关）。
+        # ui.shadow_strength=0 或性能模式 → 零投影。
         s_strength = max(0.0, float(S.get("ui.shadow_strength", 40)) / 40.0)
-        if self._paint_shadow and s_strength > 0.02:
+        if self._paint_shadow and not perf and s_strength > 0.02:
             s_blur = max(0.5, float(S.get("ui.glass_blur", 30)) / 30.0)
             dy = 4.0
             for width, alpha, grow in (
@@ -444,7 +510,7 @@ class AuroraGlassCard(QFrame):
         # 仅 hover 时同步折射一次（避免列表页批量卡片同时 grab 主窗口导致
         # 原生崩溃/卡顿）；静止卡片显示纯玻璃+Aurora，hover 后实时折射。
         glass_drawn = False
-        if self._glass_active():
+        if self._glass_active() and not perf:
             if self._refracted is None and self._hovering:
                 self._refract_frame(fast=True)
             if self._refracted is not None:
@@ -458,16 +524,19 @@ class AuroraGlassCard(QFrame):
                 glass_drawn = True
 
         if not glass_drawn:
-            # 普通玻璃底
+            # 普通玻璃底（性能模式：稳定不透明底，纯静态、零渐变叠加）
             ga = cfg["glass_opacity"]
-            base_alpha = ga + (0.10 if self._hovering else (0.05 if cfg["enabled"] else 0.0))
-            p.fillPath(path, QColor(255, 255, 255, int(min(base_alpha, 0.94) * 255)))
+            if perf:
+                p.fillPath(path, QColor(255, 255, 255, 225))
+            else:
+                base_alpha = ga + (0.10 if self._hovering else (0.05 if cfg["enabled"] else 0.0))
+                p.fillPath(path, QColor(255, 255, 255, int(min(base_alpha, 0.94) * 255)))
 
         # ── 极光光晕（N 个径向渐变，SourceOver 彩色叠加）──
         # 浅色玻璃底上用 Screen 合成会趋近纯白导致不可见，故用普通半透明叠加。
         glow = 0.0
         glow_pos = QPointF(w * self._REST_POS[0], h * self._REST_POS[1])
-        if cfg["enabled"]:
+        if cfg["enabled"] and not perf:
             if self._timer.isActive() or self._hovering:
                 glow = self._glow_alpha
                 glow_pos = QPointF(self._glow_pos)
@@ -497,16 +566,15 @@ class AuroraGlassCard(QFrame):
                 p.fillPath(path, grad)
 
         # ── 顶部玻璃高光 ──
-        hi = QLinearGradient(0, 0, 0, h * 0.55)
-        hi.setColorAt(0.0, QColor(255, 255, 255, int(64 + 18 * glow)))
-        hi.setColorAt(1.0, QColor(255, 255, 255, 0))
-        p.fillPath(path, hi)
+        if not perf:
+            hi = QLinearGradient(0, 0, 0, h * 0.55)
+            hi.setColorAt(0.0, QColor(255, 255, 255, int(64 + 18 * glow)))
+            hi.setColorAt(1.0, QColor(255, 255, 255, 0))
+            p.fillPath(path, hi)
 
         # ── 边缘高光描边（折射层已自带 rim 时跳过）──
         if not glass_drawn:
-            border = QColor(255, 255, 255, 210 if self._hovering else 110)
+            border = QColor(255, 255, 255, 210 if self._hovering else (110 if not perf else 60))
             p.setPen(QPen(border, 1.0))
             p.setBrush(Qt.NoBrush)
             p.drawPath(path)
-
-        p.end()

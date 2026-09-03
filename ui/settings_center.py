@@ -373,6 +373,11 @@ class SettingsCenterPage(QWidget):
             self._check("ui.animation", on_change=lambda: self._theme_changed()),
         )
         self._row(
+            body, "渲染性能模式",
+            self._check("ui.perf_mode"),
+            note="一键关闭极光/折射/阴影（滚动更流畅；可随时关闭此项恢复效果）",
+        )
+        self._row(
             body, "缩略图大小",
             self._combo(
                 [(f"{s}px", s) for s in (110, 138, 160, 200)],
