@@ -63,6 +63,31 @@ class BottomNavTests(unittest.TestCase):
         r = nav._capsule_rect(0)
         self.assertAlmostEqual(nav._capsule[0], r.x(), delta=0.5)
 
+    # 1b. 入口顺序与页面栈一一对应（设置=8 / 重复照片=9，与 content_stack 一致）
+    def test_entries_order_matches_content_stack(self):
+        nav = self._nav()
+        keys = [k for k, _ in nav._entries]
+        self.assertEqual(keys[8:], ["settings", "duplicates"],
+                         "底部导航末尾顺序必须与内容栈一致：设置(8)、重复照片(9)")
+
+    # 1c. 每个导航入口都有对应自绘图形（无空图标）
+    def test_all_entries_have_icons(self):
+        from ui.components.icons import _PATH_BUILDERS, draw_icon
+        from ui.bottom_nav import DEFAULT_ENTRIES
+        for key, name in DEFAULT_ENTRIES:
+            self.assertIn(key, _PATH_BUILDERS,
+                          f"导航项「{name}」({key}) 缺少自绘图标")
+        # 新图标可绘制（不抛异常）
+        nav = self._nav()
+        from PySide6.QtGui import QPixmap, QPainter, QColor
+        pm = QPixmap(64, 64)
+        pm.fill(Qt.transparent)
+        p = QPainter(pm)
+        p.setRenderHint(QPainter.Antialiasing, True)
+        draw_icon(p, pm.rect(), "duplicates", QColor(80, 80, 80))
+        p.end()
+        self.assertFalse(pm.isNull())
+
     # 2. 液态切换：动画后胶囊精确到位
     def test_capsule_lands_on_target(self):
         nav = self._nav()

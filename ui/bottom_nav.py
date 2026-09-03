@@ -25,6 +25,7 @@ from ui.aurora_card import AuroraGlassCard
 from ui.components.icons import draw_icon
 
 # 导航项： (key, 名称)（与 content_stack 页面索引一一对应）
+# 注意顺序 = 内容栈顺序：…收藏(6) 待处理(7) 设置(8) 重复照片(9)
 DEFAULT_ENTRIES = [
     ("overview", "总览"),
     ("ai_pick", "AI精选"),
@@ -34,8 +35,8 @@ DEFAULT_ENTRIES = [
     ("character", "角色"),
     ("favorites", "收藏"),
     ("pending", "待处理"),
-    ("duplicates", "重复照片"),
     ("settings", "设置"),
+    ("duplicates", "重复照片"),
 ]
 
 # 液态效果档位 → 拉伸峰值(px) × 强度

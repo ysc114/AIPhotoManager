@@ -29,7 +29,8 @@ from PySide6.QtGui import QPainterPath, QPen
 # 支持的图标键
 ICON_KEYS = (
     "overview", "ai_pick", "photo", "fursuit", "person",
-    "character", "favorites", "pending", "settings", "search", "close",
+    "character", "favorites", "pending", "settings", "duplicates",
+    "search", "close",
 )
 
 
@@ -192,6 +193,13 @@ def _path_settings():
     return gear
 
 
+def _path_duplicates():
+    """重复照片：两张圆角页片交叠（后页右上 + 前页左下，副本语义）。"""
+    back = _rounded_rect(0.28, 0.08, 0.92, 0.62, 0.10)
+    front = _rounded_rect(0.08, 0.38, 0.72, 0.92, 0.10)
+    return [back, front]
+
+
 def _path_search():
     """搜索：圆 + 手柄（供搜索框使用）。"""
     return [_circle(0.40, 0.40, 0.30), _stroke_line_handle()]
@@ -225,6 +233,7 @@ _PATH_BUILDERS = {
     "favorites": _path_favorites,
     "pending": _path_pending,
     "settings": _path_settings,
+    "duplicates": _path_duplicates,
     "search": _path_search,
     "close": _path_close,
 }
