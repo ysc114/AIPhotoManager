@@ -175,5 +175,23 @@ class CharacterCenterTests(unittest.TestCase):
         self.assertGreater(checked, 0, "应渲染出至少一张角色卡可检查")
 
 
+    # ── 渲染性能：角色卡不得挂离屏阴影效果层 ──
+    def test_card_no_graphics_effect_layer(self):
+        """QGraphicsDropShadowEffect 每卡一个离屏合成层是性能元凶；
+        卡片阴影必须由 AuroraGlassCard 自绘（graphicsEffect() 为 None）。"""
+        checked = 0
+        for card, (pk, _g, _n) in self.win._card_group_map.items():
+            if pk != "character":
+                continue
+            self.assertIsNone(
+                card.graphicsEffect(),
+                "角色卡不得使用 QGraphicsDropShadowEffect（改为卡片自绘阴影）",
+            )
+            checked += 1
+            if checked >= 12:
+                break
+        self.assertGreater(checked, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

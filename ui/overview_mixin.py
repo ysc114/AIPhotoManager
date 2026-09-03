@@ -769,15 +769,10 @@ class _OverviewMixinMixin:
             if obj in self._card_group_map or (is_frame and obj in self._tile_path_map):
                 if et == QEvent.HoverEnter:
                     if obj in self._card_group_map:
-                        # Aurora 角色卡：浮起幅度受 aurora.hover_lift 控制
-                        # （0 = 不浮起，保持静态阴影）
-                        lift = max(0.0, float(S.get("aurora.hover_lift", 0.5)))
-                        if lift > 0.01:
-                            eff = QGraphicsDropShadowEffect(obj)
-                            eff.setBlurRadius(max(1, int(12 + 12 * lift)))
-                            eff.setOffset(0, int(2 + 6 * lift))
-                            eff.setColor(QColor(40, 70, 130, int(40 + 80 * lift)))
-                            obj.setGraphicsEffect(eff)
+                        # Aurora 角色卡：hover 浮起/高亮由卡片自身 paintEvent
+                        # 驱动（极光跟随 + 描边提亮），不再新建阴影效果层
+                        # ——滚动/扫过 226 张卡零离屏合成，性能优先
+                        pass
                     else:
                         eff = QGraphicsDropShadowEffect(obj)
                         eff.setBlurRadius(18)
@@ -786,7 +781,9 @@ class _OverviewMixinMixin:
                         obj.setGraphicsEffect(eff)
                 else:
                     if obj in self._card_group_map:
-                        self._glass_shadow(obj, blur=20, dy=4, alpha=38)  # 恢复静态阴影
+                        # 移除 hover 浮起效果层；卡片投影由 AuroraGlassCard
+                        # 自绘（无离屏合成开销）
+                        obj.setGraphicsEffect(None)
                     else:
                         obj.setGraphicsEffect(None)
                 # 不拦截：hover 事件继续传播，供 AuroraGlassCard 内部驱动极光

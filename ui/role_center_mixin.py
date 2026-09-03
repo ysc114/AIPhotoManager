@@ -1126,8 +1126,8 @@ class _RoleCenterMixinMixin:
         """渲染单个角色组卡片（QFrame，左键进组 / 右键重命名）。"""
         card = AuroraGlassCard()
         card.setFixedSize(226, 248)
-        # 玻璃底 / 极光 / 高光 / 描边由 AuroraGlassCard.paintEvent 绘制
-        self._glass_shadow(card, blur=20, dy=4, alpha=38)
+        # 玻璃底 / 极光 / 高光 / 描边由 AuroraGlassCard.paintEvent 绘制；
+        # 投影也由卡片自绘（零离屏合成图层，226 张卡不叠加效果层）
         card.setCursor(Qt.PointingHandCursor)
         card.setContextMenuPolicy(Qt.CustomContextMenu)
 
@@ -1753,8 +1753,7 @@ class _RoleCenterMixinMixin:
 
         card = AuroraGlassCard(refract=False)
         card.setFixedHeight(214)
-        self._glass_shadow(card, blur=20, dy=4, alpha=38)
-
+        # 投影由卡片自绘（零离屏合成图层）
         hl = QHBoxLayout(card)
         hl.setContentsMargins(16, 12, 16, 12)
         hl.setSpacing(14)

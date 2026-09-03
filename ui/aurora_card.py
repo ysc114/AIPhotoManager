@@ -68,9 +68,10 @@ class AuroraGlassCard(QFrame):
     _SMOOTH_OUT = 0.12     # 光晕回落基准速度
     _REST_POS = (0.50, 0.42)  # 静止极光默认位置（宽高比例，中心偏上）
 
-    def __init__(self, parent=None, refract=True):
+    def __init__(self, parent=None, refract=True, shadow=True):
         super().__init__(parent)
         self._refract_enabled = bool(refract)   # False=纯装饰层（Dock/面板背景），不启用物理折射
+        self._paint_shadow = bool(shadow)       # True=自绘轻量投影（零离屏图层）
         self.setAttribute(Qt.WA_Hover, True)
         self.setMouseTracking(True)
 
@@ -415,6 +416,26 @@ class AuroraGlassCard(QFrame):
         w, h = rect.width(), rect.height()
         cfg = self._cfg()
         radius = max(4, cfg["corner_radius"])
+
+        # ── 自绘柔和投影（静态；无 QGraphicsDropShadowEffect 离屏图层）──
+        # 只随重绘绘制 3 层描边近似柔影，226 张卡也不产生离屏合成开销；
+        # ui.shadow_strength=0 → 零投影（设置中心可关）。
+        s_strength = max(0.0, float(S.get("ui.shadow_strength", 40)) / 40.0)
+        if self._paint_shadow and s_strength > 0.02:
+            s_blur = max(0.5, float(S.get("ui.glass_blur", 30)) / 30.0)
+            dy = 4.0
+            for width, alpha, grow in (
+                (max(2.5, 9.0 * s_blur), int(9 * s_strength), 7.0),
+                (max(1.8, 5.0 * s_blur), int(17 * s_strength), 4.0),
+                (1.1, int(30 * s_strength), 1.6),
+            ):
+                rr = QRectF(rect).adjusted(
+                    -grow * 0.5, -grow * 0.5 + dy, grow * 0.5, grow * 0.5 + dy
+                )
+                p.setPen(QPen(QColor(30, 60, 110, alpha), width))
+                p.setBrush(Qt.NoBrush)
+                p.drawRoundedRect(rr, radius + grow * 0.5, radius + grow * 0.5)
+
         path = QPainterPath()
         path.addRoundedRect(QRectF(rect), radius, radius)
         p.setClipPath(path)
