@@ -1169,9 +1169,10 @@ class _RoleCenterMixinMixin:
                 if cp:
                     cpix = QPixmap(cp)
                     if not cpix.isNull():
+                        # 手动裁成精确 200x148：绝不大于标签，杜绝任何
+                        # 越界绘制（高 DPI/缩放下图片溢出压到文字区）
                         cover_label.setPixmap(
-                            cpix.scaled(200, 148, Qt.KeepAspectRatioByExpanding,
-                                        Qt.SmoothTransformation)
+                            self._cover_crop_pixmap(cpix, 200, 148)
                         )
                         shown = True
                 if not shown:
@@ -1191,12 +1192,17 @@ class _RoleCenterMixinMixin:
             )
         layout.addWidget(cover_label)
 
-        name_label = QLabel(f"{display_name}")
+        # 名称：单行 + 固定高 + 省略号（长名不再换行挤压后续行，布局稳定）；
+        # 颜色加深保证玻璃底上清晰可读
+        name_label = QLabel("")
+        name_label.setFixedHeight(20)
+        name_label.setToolTip(display_name)
+        fm = QFontMetrics(name_label.font())
+        name_label.setText(fm.elidedText(display_name, Qt.ElideRight, 200))
         name_label.setStyleSheet(
-            "font-size:14.5px;font-weight:700;color:#1f2d3d;"
+            "font-size:14px;font-weight:700;color:#15222f;"
             "background:transparent;border:none;"
         )
-        name_label.setWordWrap(True)
         layout.addWidget(name_label)
 
         # 类别胶囊 + 次级信息行
@@ -1206,8 +1212,8 @@ class _RoleCenterMixinMixin:
         if category_text:
             category_label = QLabel(category_text)
             category_label.setStyleSheet(
-                "font-size:10.5px;color:#5b7bd5;font-weight:700;"
-                "background:rgba(120,150,255,0.14);border-radius:9px;"
+                "font-size:11px;color:#4a6fdd;font-weight:700;"
+                "background:rgba(120,150,255,0.22);border-radius:9px;"
                 "padding:2px 9px;border:none;"
             )
             meta_row.addWidget(category_label)
@@ -1216,7 +1222,7 @@ class _RoleCenterMixinMixin:
         if source_text:
             source_label = QLabel(source_text)
             source_label.setStyleSheet(
-                "font-size:10.5px;color:#8a97a8;background:transparent;border:none;"
+                "font-size:10.5px;color:#6c7d91;background:transparent;border:none;"
             )
             meta_row.addWidget(source_label)
         meta_row.addStretch()
@@ -1225,9 +1231,13 @@ class _RoleCenterMixinMixin:
         count = self._unique_photo_count(group)
         count_label = QLabel(f"{count} 张照片")
         count_label.setStyleSheet(
-            "font-size:11.5px;color:#8a97a8;background:transparent;border:none;"
+            "font-size:12px;color:#5c6d81;background:transparent;border:none;"
         )
         layout.addWidget(count_label)
+
+        # 固定总高校验：封面 148 + 名称 20 + 胶囊 22 + 张数 17（+间距/边距）
+        # 恰好 = 248，全部文字都在卡片内，不会再被裁切/挤压
+        layout.addStretch(1)
 
         self._card_group_map[card] = (page_key, group, display_name)
         card.installEventFilter(self)
@@ -1236,6 +1246,23 @@ class _RoleCenterMixinMixin:
         )
         return card
 
+
+    @staticmethod
+    def _cover_crop_pixmap(pix, w, h):
+        """等比撑满后居中裁成精确 w×h（不产生大于标签的图，杜绝越界绘制）。
+
+        任何来源的封面缩略图先过这里，保证 setPixmap 的图尺寸 <= 标签。
+        """
+        if pix.isNull():
+            return pix
+        scaled = pix.scaled(
+            w, h, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation
+        )
+        if scaled.width() == w and scaled.height() == h:
+            return scaled
+        x = (scaled.width() - w) // 2
+        y = (scaled.height() - h) // 2
+        return scaled.copy(x, y, w, h)
 
     def _on_cover_thumb_ready(self, label, cache_path):
         """缩略图后台生成完成 → 主线程更新角色卡片封面。
@@ -1248,9 +1275,7 @@ class _RoleCenterMixinMixin:
             pix = QPixmap(cache_path)
             if pix.isNull():
                 return
-            label.setPixmap(
-                pix.scaled(200, 148, Qt.KeepAspectRatioByExpanding, Qt.SmoothTransformation)
-            )
+            label.setPixmap(self._cover_crop_pixmap(pix, 200, 148))
         except Exception as e:
             print(f"[封面缓存] 更新失败: {e}")
 
@@ -1822,11 +1847,11 @@ class _RoleCenterMixinMixin:
         name_text = self._suspect_display_name(group)
         fm = QFontMetrics(cover_label.font())
         name_label = QLabel(fm.elidedText(name_text, Qt.ElideRight, 226))
-        name_label.setFixedHeight(18)
+        name_label.setFixedHeight(20)
         name_label.setAlignment(Qt.AlignCenter)
         name_label.setToolTip(name_text)
         name_label.setStyleSheet(
-            "font-size:13.5px;font-weight:700;color:#1f2d3d;"
+            "font-size:13.5px;font-weight:700;color:#15222f;"
             "background:transparent;border:none;"
         )
         bl.addWidget(name_label)
@@ -1835,15 +1860,15 @@ class _RoleCenterMixinMixin:
         if category_text:
             cat_label = QLabel(category_text)
             cat_label.setStyleSheet(
-                "font-size:10px;color:#5b7bd5;font-weight:700;"
-                "background:rgba(120,150,255,0.14);border-radius:8px;"
+                "font-size:10px;color:#4a6fdd;font-weight:700;"
+                "background:rgba(120,150,255,0.22);border-radius:8px;"
                 "padding:1px 8px;border:none;"
             )
             bl.addWidget(cat_label, 0, Qt.AlignHCenter)
 
         count_label = QLabel(f"{self._unique_photo_count(group)} 张照片")
         count_label.setStyleSheet(
-            "font-size:11px;color:#8a97a8;background:transparent;border:none;"
+            "font-size:11px;color:#5c6d81;background:transparent;border:none;"
         )
         bl.addWidget(count_label, 0, Qt.AlignHCenter)
         bl.addStretch(1)

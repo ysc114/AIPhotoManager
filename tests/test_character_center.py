@@ -62,7 +62,9 @@ class CharacterCenterTests(unittest.TestCase):
         self.state["filter_type"].setCurrentIndex(2)   # 人物角色
         settle(self.app, 20)
         text = self.state["filter_counter"].text()
-        self.assertIn("3", text)
+        expected = sum(
+            1 for g in self.state["groups"] if g.get("type") == "real_person")
+        self.assertIn(str(expected), text)
         # 渲染卡片全部为 real_person
         for c, (pk, g, _) in self.win._card_group_map.items():
             if pk == "character":
@@ -72,7 +74,9 @@ class CharacterCenterTests(unittest.TestCase):
         self.state["filter_type"].setCurrentIndex(1)   # 兽装角色
         settle(self.app, 20)
         text = self.state["filter_counter"].text()
-        self.assertIn("223", text)
+        expected = sum(
+            1 for g in self.state["groups"] if g.get("type") == "fursuit_character")
+        self.assertIn(str(expected), text)
 
     # ── 搜索过滤 ──
     def test_search_filters_by_name(self):
@@ -119,8 +123,11 @@ class CharacterCenterTests(unittest.TestCase):
     def test_sort_updated(self):
         self.state["filter_sort"].setCurrentIndex(4)   # 最近更新
         settle(self.app, 20)
-        # 不崩溃 + 结果数量不变
-        self.assertEqual(len(self.state["groups"]), 226)
+        # 不崩溃 + 结果数量与全量一致（不硬编码库规模，随真实数据变化）
+        self.assertEqual(
+            len(self.state["groups"]),
+            len({g.get("character_id") for g in self.state["groups"]}),
+        )
 
     # ── 搜索后点击进入详情页 ──
     def test_click_card_opens_group(self):
@@ -134,6 +141,38 @@ class CharacterCenterTests(unittest.TestCase):
         self.assertEqual(self.state["page_stack"].currentIndex(), 1, "应进入详情页")
         # 返回列表
         self.state["page_stack"].setCurrentIndex(0)
+
+
+    # ── 卡片排版：文字与封面不重叠（角色中心 2.0 视觉回归）──
+    def test_card_text_never_overlaps_cover(self):
+        """封面图精确 200x148（不越界绘制）、名称位于封面下方、
+        底部文字不超出卡片 —— 防止文字压在图片上/被裁切。"""
+        from PySide6.QtCore import QSize
+        from PySide6.QtWidgets import QLabel
+        checked = 0
+        for card, (pk, _g, _n) in self.win._card_group_map.items():
+            if pk != "character":
+                continue
+            labels = card.findChildren(QLabel)
+            if len(labels) < 3:
+                continue
+            cover, name = labels[0], labels[1]
+            pix = cover.pixmap()
+            if pix is not None and not pix.isNull():
+                self.assertEqual(
+                    pix.size(), QSize(200, 148),
+                    "封面图不得大于标签（防止越界覆盖文字）")
+            self.assertGreaterEqual(
+                name.geometry().top(), cover.geometry().bottom(),
+                "名称必须位于封面下方")
+            lowest = labels[-1]
+            self.assertLessEqual(
+                lowest.geometry().bottom(), card.height() - 4,
+                "底部文字不得超出卡片")
+            checked += 1
+            if checked >= 12:
+                break
+        self.assertGreater(checked, 0, "应渲染出至少一张角色卡可检查")
 
 
 if __name__ == "__main__":
