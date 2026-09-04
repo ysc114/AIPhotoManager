@@ -159,6 +159,12 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         self._card_group_map = {}    # QFrame → (page_key, group_dict, display_name)
         self._tile_path_map = {}     # QLabel → (page_key, group_dict, image_path, detection_index)
 
+        # Spotlight 全局搜索：面板/快捷键/最近搜索（会话内）
+        self._global_search = None
+        self._gs_shortcuts = []
+        self._gs_recents = []
+        self._gs_panel_w = 640
+
         self.init_ui()
 
         self.connect_signal()
@@ -244,7 +250,7 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         self.content_stack.addWidget(self.duplicates_page)
         self.duplicates_page.data_changed.connect(self._on_duplicates_changed)
 
-        # ── 全局搜索条（顶部 Liquid Glass 胶囊）+ 内容区 ──
+        # ── 全局搜索条（顶部 Liquid Glass 胶囊）+ Spotlight 搜索面板 + 内容区 ──
         self.search_bar = GlassSearchBar()
         self.search_bar.role_activated.connect(self._open_group_from_search)
         self.search_bar.photo_activated.connect(self._open_photo_by_path)
@@ -252,8 +258,30 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         main_layout = QVBoxLayout(main_area)
         main_layout.setContentsMargins(0, 0, 0, 0)
         main_layout.setSpacing(10)
-        main_layout.addWidget(self.search_bar)
+        top_row = QHBoxLayout()
+        top_row.setSpacing(10)
+        top_row.addWidget(self.search_bar, 1)
+        self.gs_btn = QPushButton("🔍 搜索  Ctrl+K")
+        self.gs_btn.setCursor(Qt.PointingHandCursor)
+        self.gs_btn.setStyleSheet(
+            "QPushButton{background:rgba(255,255,255,0.7);color:#3a5a7a;"
+            "border:1px solid rgba(255,255,255,0.9);padding:7px 14px;"
+            "border-radius:15px;font-size:12px;font-weight:600;}"
+            "QPushButton:hover{background:rgba(255,255,255,0.95);}"
+        )
+        self.gs_btn.clicked.connect(self._toggle_global_search)
+        top_row.addWidget(self.gs_btn)
+        main_layout.addLayout(top_row)
         main_layout.addWidget(self.content_stack, 1)
+
+        # ── Spotlight 全局搜索面板（组件化；数据与跳转由 MainWindow 决定）──
+        from ui.components.global_search import GlobalSearchPanel, PANEL_W
+        self._gs_panel_w = PANEL_W
+        self._global_search = GlobalSearchPanel(main_area)
+        self._global_search.search_requested.connect(self._on_global_search_query)
+        self._global_search.result_selected.connect(self._on_global_result_selected)
+        self._global_search.hide()
+        self._gs_recents = []   # 最近搜索（会话内）
 
         root.addWidget(main_area, 1)
         self._root_layout = root
@@ -675,6 +703,8 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         super().resizeEvent(event)
         if hasattr(self, "bottom_nav"):
             self._layout_bottom_nav()
+        if getattr(self, "_global_search", None):
+            self._layout_global_search()
 
     # ------------------------------------------------------------
     # 总览页
@@ -1330,6 +1360,131 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         self.btn_refresh_overview.clicked.connect(
             self._refresh_overview
         )
+
+        # ── Spotlight 全局搜索快捷键（Ctrl+K 新增；Ctrl+Shift+F 既有约定复用）──
+        from PySide6.QtGui import QKeySequence, QShortcut
+        for ks in ("Ctrl+K", "Ctrl+Shift+F"):
+            sc = QShortcut(QKeySequence(ks), self)
+            sc.activated.connect(self._open_global_search)
+            self._gs_shortcuts.append(sc)
+
+    # ------------------------------------------------------------
+    # Spotlight 全局搜索面板（组件化：组件只发信号，此处决定数据/跳转）
+    # ------------------------------------------------------------
+    def _layout_global_search(self):
+        """面板定位：内容区顶部居中。"""
+        panel = getattr(self, "_global_search", None)
+        if panel is None:
+            return
+        parent = panel.parentWidget()
+        pw = parent.width() if parent else self.width()
+        x = max(0, (pw - getattr(self, "_gs_panel_w", 640)) // 2)
+        panel.move(x, 64)
+
+    def _open_global_search(self):
+        self._layout_global_search()
+        self._global_search.show_panel()
+
+    def _toggle_global_search(self):
+        if self._global_search.is_visible():
+            self._global_search.hide_panel()
+        else:
+            self._open_global_search()
+
+    def _on_global_search_query(self, query):
+        """组件查询回调：用现有只读数据构造分区结果（不写库/不改业务）。"""
+        q = (query or "").strip().lower()
+        if not q:
+            self._global_search.set_results([], recent=self._gs_recents)
+            return
+        sections = []
+
+        # 🐺/👤 角色（get_groups 只读，名称或 id 子串匹配）
+        char_items = []
+        try:
+            from core.identity import get_reader
+            mgr = get_reader()
+            try:
+                groups = mgr.get_groups("all") or []
+            finally:
+                mgr.close()
+        except Exception:
+            groups = []
+        for g in groups:
+            name = (g.get("name") or "").lower()
+            cid = str(g.get("character_id") or "").lower()
+            if q not in name and q not in cid:
+                continue
+            st = g.get("source_types") or []
+            icon = ("🐺" if st == ["fursuit_fursee"] else
+                    "👤" if st == ["face"] else "🎭")
+            char_items.append({
+                "icon": icon,
+                "title": g.get("name") or f"角色 {str(g.get('character_id') or '')[:8]}",
+                "subtitle": self._format_group_category(g),
+                "badge": "角色",
+                "payload": {"kind": "character", "group": g},
+            })
+            if len(char_items) >= 6:
+                break
+        if char_items:
+            sections.append({"title": "🐺 角色", "items": char_items})
+
+        # 📷 照片（photos/ 文件名子串匹配；预留标签/文件分区）
+        photos_dir = os.path.normpath(os.path.join(
+            os.path.dirname(os.path.abspath(__file__)), "..", "photos"))
+        photo_items = []
+        if os.path.isdir(photos_dir):
+            for n in sorted(os.listdir(photos_dir)):
+                if q in n.lower():
+                    p = os.path.join(photos_dir, n).replace("\\", "/")
+                    photo_items.append({
+                        "icon": "📷", "title": n, "subtitle": "照片",
+                        "badge": "照片",
+                        "payload": {"kind": "photo", "path": p},
+                    })
+                    if len(photo_items) >= 6:
+                        break
+        if photo_items:
+            sections.append({"title": "📷 照片", "items": photo_items})
+
+        # ⭐ 收藏（favorite_image 只读，文件名匹配）
+        fav_items = []
+        try:
+            from core.identity import get_reader
+            mgr = get_reader()
+            try:
+                favs = mgr.db.list_favorites()
+            finally:
+                mgr.close()
+        except Exception:
+            favs = []
+        for p in favs:
+            if q in os.path.basename(p).lower():
+                fav_items.append({
+                    "icon": "⭐", "title": os.path.basename(p),
+                    "subtitle": "收藏", "badge": "收藏",
+                    "payload": {"kind": "photo", "path": p},
+                })
+                if len(fav_items) >= 4:
+                    break
+        if fav_items:
+            sections.append({"title": "⭐ 收藏", "items": fav_items})
+
+        self._global_search.set_results(sections)
+
+    def _on_global_result_selected(self, item):
+        """结果打开：角色 → 角色详情；照片/收藏/文件 → 照片页预览。"""
+        payload = item.get("payload") or {}
+        title = str(item.get("title") or "").strip()
+        if title:
+            self._gs_recents = [title] + [r for r in self._gs_recents if r != title]
+            self._gs_recents = self._gs_recents[:8]
+        kind = payload.get("kind")
+        if kind == "character" and payload.get("group"):
+            self._open_group_from_search(payload["group"])
+        elif payload.get("path"):
+            self._open_photo_by_path(payload["path"])
 
     def open_folder(self):
 

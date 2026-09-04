@@ -708,6 +708,7 @@ class SettingsCenterPage(QWidget):
             ("上一张", "←"),
             ("返回", "Esc"),
             ("搜索", "Ctrl+Shift+F"),
+            ("全局搜索面板", "Ctrl+K"),
         ]
         grid = QGridLayout()
         grid.setSpacing(8)

@@ -34,6 +34,7 @@ AI 照片管理系统：本地 + NAS 照片管理，AI 自动分类、兽装/人
 - **疑似同一角色**（角色中心 2.0 · 第二阶段）：跨 Fursee 组相似候选（只读比较，不改 0.79/eps）→ 人工确认才合并；"不是同一角色"判定与最近合并快照存 JSON sidecar（不改 schema），支持撤销最近一次合并
 - **疑似重复照片**（路线图 ②）：视觉相似检测（dHash + 直方图 + 灰度相关性，区别于 MD5 的"内容完全一致"）——连拍/构图相似/轻微糊/曝光不同；AI 只推荐，人工「保留此张/忽略该组」，绝不自动删除（待清理仅标记，落盘 JSON 缓存复用）
 - **相似照片搜索**（路线图 ③）：选一张照片 → 复用视觉指纹返回库内最相似的 N 张（同场景/同角色/连拍），纯只读
+- **全局搜索面板**（路线图 ④ 第一阶段）：Spotlight 风格悬浮搜索（Ctrl+K / Ctrl+Shift+F），分区结果（最近搜索/角色/照片/收藏，标签/文件预留）；组件化 `ui/components/global_search.py`，只发信号，数据与跳转由 MainWindow 决定
 - **角色照片墙**：组内按 `(path, det_idx)` 去重，bbox 主体裁剪作为卡片封面
 - **缩略图优化**：`QImageReader.setClipRect` 先裁后缩 + EXIF 旋转映射，小主体不再模糊
 
@@ -270,6 +271,7 @@ QT_QPA_PLATFORM=offscreen C:/Program Files/Python310/python.exe -m unittest disc
 | `test_suspects_ui.py` | 疑似同一角色 GUI 冒烟（offscreen，只读）|
 | `test_visual_duplicates.py` | 疑似重复照片：dHash/直方图/灰度指纹、分组、MD5 副本隔离、忽略/保留决策持久化、相似搜索（temp）|
 | `test_visual_duplicates_ui.py` | 重复照片页视觉区块 + 相似搜索区块 GUI 冒烟（temp，只标记不删除）|
+| `test_global_search.py` | Spotlight 全局搜索面板：防抖/分区渲染/键盘导航/Esc/最近搜索 + 主窗口快捷键与分发冒烟（offscreen）|
 | `test_legacy_visibility.py` | get_groups 过滤（连接生产库，慎跑）|
 | `test_ai_classifier_cache.py` | 缓存命中（None/{}→重分析，有效→命中）|
 
