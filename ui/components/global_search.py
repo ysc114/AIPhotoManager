@@ -292,6 +292,19 @@ class GlobalSearchPanel(QWidget):
                 self._rows.append(row)
                 self._items.append(it)
                 self._results_layout.insertWidget(self._results_layout.count() - 1, row)
+        # 空结果反馈（否则像"搜索不了"）
+        if not self._items:
+            if self._query:
+                tip = f"没有找到与「{self._query}」匹配的内容\n试试文件名、角色名或类别（如：兽装 / 人物）"
+            else:
+                tip = "输入关键字开始搜索（文件名 / 角色名 / 类别）"
+            empty = QLabel(tip)
+            empty.setAlignment(Qt.AlignCenter)
+            empty.setWordWrap(True)
+            empty.setStyleSheet(
+                "font-size:13px;color:#8a97a8;background:transparent;"
+                "border:none;padding:26px 10px;")
+            self._results_layout.insertWidget(self._results_layout.count() - 1, empty)
         # 最近搜索 chips
         self._render_recents(recent or [])
         self._sel = -1

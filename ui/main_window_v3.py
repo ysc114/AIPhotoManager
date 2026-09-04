@@ -1393,6 +1393,7 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
 
     def _on_global_search_query(self, query):
         """组件查询回调：用现有只读数据构造分区结果（不写库/不改业务）。"""
+        self._global_search.set_query(query or "")   # 同步组件内部状态
         q = (query or "").strip().lower()
         if not q:
             self._global_search.set_results([], recent=self._gs_recents)
@@ -1413,7 +1414,10 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         for g in groups:
             name = (g.get("name") or "").lower()
             cid = str(g.get("character_id") or "").lower()
-            if q not in name and q not in cid:
+            cat = (self._format_group_category(g) or "").lower()
+            disp = (g.get("name") or
+                    f"未命名角色 #{str(g.get('character_id') or '')[:8]}").lower()
+            if q not in name and q not in cid and q not in cat and q not in disp:
                 continue
             st = g.get("source_types") or []
             icon = ("🐺" if st == ["fursuit_fursee"] else

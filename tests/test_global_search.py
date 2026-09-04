@@ -128,9 +128,19 @@ class GlobalSearchWindowTests(unittest.TestCase):
         settle(self.app, 6)
         # 空查询 → 最近搜索（空列表也安全）
         self.win._on_global_search_query("")
-        # 查询"角色"（现有只读数据；结果可为空，不崩溃即可）
-        self.win._on_global_search_query("角色")
+        # 查询"兽装"（类别匹配：应命中兽装角色组；无库数据时跳过）
+        self.win._on_global_search_query("兽装")
         settle(self.app, 4)
+        if self.win._global_search._items:
+            self.assertGreater(len(self.win._global_search._items), 0)
+        else:
+            self.skipTest("库中无兽装角色组")
+        # 无结果查询 → 面板显示提示（不空白）
+        self.win._on_global_search_query("__no_such_thing__")
+        settle(self.app, 4)
+        self.assertEqual(len(self.win._global_search._items), 0)
+        texts = [l.text() for l in self.win._global_search.findChildren(QLabel)]
+        self.assertTrue(any("没有找到" in t for t in texts), "应有无结果提示")
         # 无 payload 的结果：仅记录最近搜索，不跳转不崩溃
         self.win._on_global_result_selected(
             {"title": "测试条目", "payload": {}})
