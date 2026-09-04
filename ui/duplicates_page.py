@@ -1,26 +1,27 @@
 """
-duplicates_page.py —— ♻️ 重复照片管理中心
+duplicates_page.py —— ♻️ 重复照片管理中心（MD5 完全一致 + 👀 疑似重复视觉相似）
 
-Liquid Glass / Aurora 风格独立页面：
-- 自动扫描照片库，按 MD5 分组（完全相同才归组，不误判"看起来相似"）
-- 每组显示缩略图 / 文件名 / 大小 / 路径 + 「共 X 个副本」
-- 支持选择要保留的文件、批量选择副本、全部选择 / 反选 / 删除选中
-- 删除前二次确认；安全规则：每组至少保留 1 个（自动保留最大文件）
-- 删除后刷新本页并发出 data_changed 信号（主窗口刷新图库/角色/统计）
+Liquid Glass / Aurora 风格独立页面，分两个区块：
+- ⑵ 👀 疑似重复（视觉相似）：dHash + 直方图 + 技术指标 找"连拍/构图几乎
+  一致/轻微糊/曝光不同"的候选组；**AI 只推荐，绝不自动删除**；
+  人工「保留此张」→ 其余仅标记为待清理候选（落盘 JSON，不删文件）；
+  「忽略该组」→ 永久不再推荐。首次计算在后台线程，结果缓存复用。
+- ⑰ 完全相同（MD5 一致）：原功能原样保留（扫描/勾选/安全删除）。
 
-与角色身份彻底分离：core.duplicates.DuplicateCleaner 只删该文件自身
-记录（identity_image / favorite / analysis_cache），不碰角色组与 embedding。
+与角色身份彻底分离：本页不写 identity_db、不触碰角色组/character_id；
+MD5 删除仍走 core.duplicates.DuplicateCleaner（只清理该文件自身记录）。
 """
 
 import os
 
-from PySide6.QtCore import Qt, Signal
+from PySide6.QtCore import Qt, Signal, QThread
 from PySide6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout, QScrollArea,
     QCheckBox, QFrame, QPushButton, QMessageBox,
 )
 
 from core.duplicates import DuplicateScanner, DuplicateCleaner
+from core.visual_duplicates import VisualDuplicateIndex
 from core.thumbnail_cache import thumbnail_cache
 from config.settings_manager import settings as S
 
@@ -33,18 +34,42 @@ def _fmt_size(b):
     return f"{b} B"
 
 
+class _VisualScanWorker(QThread):
+    """后台计算视觉指纹（首次/有新照片时），完成后返回候选组。"""
+
+    progress = Signal(int, int)         # (done, total)
+    done = Signal(object)               # groups list
+    failed = Signal(str)
+
+    def __init__(self, index, parent=None):
+        super().__init__(parent)
+        self._index = index
+
+    def run(self):
+        try:
+            self._index.compute_all(
+                progress_cb=lambda d, t: self.progress.emit(d, t))
+            groups = self._index.groups()
+            self.done.emit(groups)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
 class DuplicatesPage(QWidget):
-    """重复照片管理页（扫描 → 选择 → 确认删除 → 刷新）。"""
+    """重复照片管理页（视觉相似 + MD5 完全相同）。"""
 
     data_changed = Signal()          # 删除完成后通知主窗口（图库/角色/统计刷新）
 
-    def __init__(self, photos_dir=None, parent=None):
+    def __init__(self, photos_dir=None, index_path=None, parent=None):
         super().__init__(parent)
         self._photos_dir = photos_dir
         self._scanner = DuplicateScanner(photos_dir)
         self._cleaner = DuplicateCleaner(photos_dir)
-        self._groups = []            # 扫描结果 [{md5, paths:[...]}]
+        self._visual = VisualDuplicateIndex(photos_dir, index_path)
+        self._groups = []            # MD5 扫描结果 [{md5, paths:[...]}]
         self._sel = {}               # 绝对路径 -> 是否选中（删除）
+        self._visual_groups = []     # 视觉候选组
+        self._visual_worker = None
 
         self._build_ui()
         self.refresh()
@@ -68,9 +93,28 @@ class DuplicatesPage(QWidget):
             "font-size:13px;color:#6b7a90;background:transparent;border:none;")
         head.addWidget(self._stats)
         head.addStretch(1)
+
+        # 视觉相似区块操作（扫描/状态/待清理统计）
+        self._visual_btn = QPushButton("👀 检测视觉相似")
+        self._visual_btn.setCursor(Qt.PointingHandCursor)
+        self._visual_btn.setStyleSheet(
+            "QPushButton{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #7fb2ff,stop:1 #8f8cff);color:white;border:none;"
+            "padding:7px 16px;border-radius:14px;font-size:12.5px;font-weight:700;}"
+            "QPushButton:hover{background:qlineargradient(x1:0,y1:0,x2:1,y2:0,"
+            "stop:0 #6ba3f5,stop:1 #7f7cf0);}"
+            "QPushButton:disabled{background:rgba(200,200,210,0.6);color:#9aa6b8;}"
+        )
+        self._visual_btn.clicked.connect(self._start_visual_scan)
+        head.addWidget(self._visual_btn)
+        self._visual_stats = QLabel("")
+        self._visual_stats.setStyleSheet(
+            "font-size:12px;color:#3f7bd5;background:rgba(110,160,255,0.14);"
+            "border-radius:9px;padding:3px 10px;border:none;font-weight:700;")
+        head.addWidget(self._visual_stats)
         outer.addLayout(head)
 
-        # 操作行
+        # MD5 区块操作行（原功能保留）
         bar = QHBoxLayout()
         for text, slot, danger in (
             ("全部选择", self._select_all, False),
@@ -113,44 +157,255 @@ class DuplicatesPage(QWidget):
         self._cards_layout = QVBoxLayout(self._cards_host)
         self._cards_layout.setContentsMargins(0, 0, 4, 0)
         self._cards_layout.setSpacing(12)
-        self._cards_layout.addStretch(1)
         self._scroll.setWidget(self._cards_host)
         outer.addWidget(self._scroll, 1)
 
     # --------------------------------------------------------
-    # 刷新
+    # 刷新（MD5 + 视觉）
     # --------------------------------------------------------
     def refresh(self):
-        """重新扫描 + 重建列表。"""
+        """重新扫描 MD5（同步）+ 视觉指纹（增量后台或缓存直出）。"""
         self._groups = self._scanner.scan()
         self._sel = {}
         for g in self._groups:
             for item in g["paths"]:
                 self._sel[item["path"]] = False
+        # 视觉：有新/变更照片才后台重算；否则直接用缓存分组
+        if self._visual_worker is not None and self._visual_worker.isRunning():
+            self._rebuild()
+            return
+        if self._visual.stale_files():
+            self._start_visual_scan()
+        else:
+            self._visual_groups = self._visual.groups()
+            self._rebuild()
+
+    def _start_visual_scan(self):
+        if self._visual_worker is not None and self._visual_worker.isRunning():
+            return
+        self._visual_btn.setEnabled(False)
+        self._visual_stats.setText("检测中…")
+        worker = _VisualScanWorker(self._visual)
+        worker.progress.connect(self._on_visual_progress)
+        worker.done.connect(self._on_visual_done)
+        worker.failed.connect(self._on_visual_failed)
+        self._visual_worker = worker
+        worker.start()
+
+    def _on_visual_progress(self, done, total):
+        self._visual_stats.setText(f"检测中… {done}/{total}")
+
+    def _on_visual_done(self, groups):
+        self._visual_worker = None
+        self._visual_btn.setEnabled(True)
+        self._visual_groups = groups or []
         self._rebuild()
 
+    def _on_visual_failed(self, err):
+        self._visual_worker = None
+        self._visual_btn.setEnabled(True)
+        self._visual_stats.setText("检测失败")
+        QMessageBox.information(self, "视觉检测失败", f"计算照片指纹时出错：{err}")
+
+    # --------------------------------------------------------
+    # 重建列表（视觉区块 + MD5 区块）
+    # --------------------------------------------------------
     def _rebuild(self):
-        # 清空旧卡片
-        while self._cards_layout.count() > 1:
+        # 清空全部
+        while self._cards_layout.count():
             item = self._cards_layout.takeAt(0)
-            if item.widget():
-                item.widget().deleteLater()
+            w = item.widget()
+            if w:
+                w.deleteLater()
+
+        # ── ⑵ 👀 疑似重复（视觉相似）──
+        self._cards_layout.addWidget(self._build_visual_section())
+
+        # ── ⑰ 完全相同（MD5）──
         n_groups = len(self._groups)
         n_files = sum(len(g["paths"]) for g in self._groups)
-        self._stats.setText(f"发现 {n_groups} 组重复照片 · {n_files} 个文件")
+        md5_head = QLabel(f"⑰ 完全相同（MD5） · {n_groups} 组 / {n_files} 个文件")
+        md5_head.setStyleSheet(
+            "font-size:13.5px;font-weight:800;color:#2a3a52;background:transparent;border:none;")
+        self._cards_layout.addWidget(md5_head)
         if n_groups == 0:
             empty = QLabel("✅ 未发现完全相同的重复照片。")
             empty.setStyleSheet(
-                "font-size:15px;color:#7c8ba0;padding:60px 0;background:transparent;border:none;")
+                "font-size:13px;color:#7c8ba0;padding:10px 0;background:transparent;border:none;")
             empty.setAlignment(Qt.AlignCenter)
-            self._cards_layout.insertWidget(0, empty)
-            return
-        for gi, g in enumerate(self._groups):
-            self._cards_layout.insertWidget(gi, self._build_group_card(g))
+            self._cards_layout.addWidget(empty)
+        else:
+            for gi, g in enumerate(self._groups):
+                self._cards_layout.addWidget(self._build_group_card(g))
+        self._cards_layout.addStretch(1)
         self._update_delete_btn()
 
+    # --------------------------------------------------------
+    # 👀 视觉相似区块
+    # --------------------------------------------------------
+    def _build_visual_section(self):
+        frame = QFrame()
+        _ga = float(S.get("ui.glass_opacity", 0.55))
+        _cr = int(S.get("ui.corner_radius", 18))
+        frame.setStyleSheet(f"""
+            QFrame {{
+                background: rgba(255,255,255,{max(0.3, _ga - 0.18)});
+                border: 1px solid rgba(255,255,255,0.8);
+                border-radius: {_cr}px;
+            }}
+        """)
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(16, 12, 16, 12)
+        lay.setSpacing(10)
+
+        head = QHBoxLayout()
+        tag = QLabel("👀 疑似重复 · 视觉相似")
+        tag.setStyleSheet(
+            "font-size:12px;color:#7a52e8;background:rgba(150,130,255,0.16);"
+            "border-radius:9px;padding:3px 10px;border:none;font-weight:700;")
+        head.addWidget(tag)
+        hint = QLabel("连拍/构图相似/轻微糊/曝光不同 · AI 只推荐，绝不自动删除")
+        hint.setStyleSheet("font-size:11px;color:#8a97a8;background:transparent;border:none;")
+        head.addWidget(hint)
+        head.addStretch(1)
+        pending = self._visual.pending_cleanup()
+        self._visual_stats.setText(
+            f"候选 {len(self._visual_groups)} 组 · 待清理标记 {len(pending)} 张")
+        lay.addLayout(head)
+
+        if not self._visual_groups:
+            note = QLabel(
+                "尚未发现疑似重复（点击右上「👀 检测视觉相似」）"
+                if self._visual.stale_files() else
+                "✅ 未发现疑似重复照片。")
+            note.setStyleSheet(
+                "font-size:13px;color:#7c8ba0;padding:6px 0;background:transparent;border:none;")
+            note.setAlignment(Qt.AlignCenter)
+            lay.addWidget(note)
+            return frame
+        for g in self._visual_groups:
+            lay.addWidget(self._build_visual_group_card(g))
+        return frame
+
+    def _build_visual_group_card(self, g):
+        card = QFrame()
+        card.setStyleSheet(
+            "QFrame{background:rgba(255,255,255,0.45);border-radius:14px;border:none;}")
+        lay = QVBoxLayout(card)
+        lay.setContentsMargins(12, 10, 12, 12)
+        lay.setSpacing(8)
+
+        head = QHBoxLayout()
+        score = QLabel(f"相似 {g['score'] * 100:.0f}%")
+        score.setStyleSheet(
+            "font-size:11.5px;color:#7a52e8;background:rgba(150,130,255,0.18);"
+            "border-radius:9px;padding:2px 10px;border:none;font-weight:700;")
+        head.addWidget(score)
+        reason = QLabel(g.get("reason", ""))
+        reason.setStyleSheet("font-size:11px;color:#6b7a90;background:transparent;border:none;")
+        head.addWidget(reason)
+        head.addStretch(1)
+        ignore = QPushButton("忽略该组")
+        ignore.setCursor(Qt.PointingHandCursor)
+        ignore.setStyleSheet(
+            "QPushButton{background:rgba(255,255,255,0.7);color:#6b7a90;border:1px solid rgba(255,255,255,0.9);"
+            "padding:4px 12px;border-radius:11px;font-size:11px;font-weight:600;}"
+            "QPushButton:hover{background:rgba(255,255,255,0.95);}")
+        ignore.clicked.connect(lambda _=False, gg=g: self._on_visual_ignore(gg))
+        head.addWidget(ignore)
+        lay.addLayout(head)
+
+        for ph in g["photos"]:
+            lay.addWidget(self._build_visual_photo_row(g, ph))
+        return card
+
+    def _build_visual_photo_row(self, g, ph):
+        row = QFrame()
+        row.setStyleSheet("QFrame{background:rgba(255,255,255,0.42);border-radius:12px;border:none;}")
+        h = QHBoxLayout(row)
+        h.setContentsMargins(10, 8, 10, 8)
+        h.setSpacing(12)
+
+        img = QLabel()
+        img.setFixedSize(72, 72)
+        img.setAlignment(Qt.AlignCenter)
+        img.setStyleSheet("background:rgba(240,244,250,0.6);border-radius:10px;border:none;")
+        try:
+            cp = thumbnail_cache.get_cached(ph["path"], 128)
+        except Exception:
+            cp = None
+        from PySide6.QtGui import QPixmap
+        if cp:
+            px = QPixmap(cp)
+            if not px.isNull():
+                img.setPixmap(px.scaled(72, 72, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            else:
+                img.setText("🖼")
+        else:
+            img.setText("🖼")
+        h.addWidget(img)
+
+        info = QVBoxLayout()
+        info.setSpacing(2)
+        name = QLabel(ph["name"])
+        name.setStyleSheet(
+            "font-size:12.5px;font-weight:600;color:#33445c;background:transparent;border:none;")
+        meta = QLabel(
+            f"{_fmt_size(ph['size'])} · {ph['w']}×{ph['h']} · "
+            f"清晰 {ph['sharp']:.2f} · 曝光 {ph['exposure']:.2f}")
+        meta.setStyleSheet("font-size:10.5px;color:#8a97a8;background:transparent;border:none;")
+        info.addWidget(name)
+        info.addWidget(meta)
+        h.addLayout(info, 1)
+
+        if self._visual.candidate_mark(ph["path"]):
+            mark = QLabel("已标记待清理")
+            mark.setStyleSheet(
+                "font-size:10.5px;color:#e8964f;background:rgba(255,170,80,0.16);"
+                "border-radius:9px;padding:2px 10px;border:none;font-weight:700;")
+            h.addWidget(mark)
+        elif self._visual.is_resolved(ph["path"]):
+            mark = QLabel("保留")
+            mark.setStyleSheet(
+                "font-size:10.5px;color:#3f9d6b;background:rgba(90,200,140,0.16);"
+                "border-radius:9px;padding:2px 10px;border:none;font-weight:700;")
+            h.addWidget(mark)
+        else:
+            keep = QPushButton("保留此张")
+            keep.setCursor(Qt.PointingHandCursor)
+            keep.setStyleSheet(
+                "QPushButton{background:rgba(90,170,255,0.16);color:#3f7bd5;border:none;"
+                "padding:5px 14px;border-radius:12px;font-size:11.5px;font-weight:700;}"
+                "QPushButton:hover{background:rgba(90,170,255,0.28);}")
+            keep.clicked.connect(
+                lambda _, gg=g, p=ph: self._on_visual_keep(gg, p))
+            h.addWidget(keep)
+        return row
+
+    # --------------------------------------------------------
+    # 视觉交互（只记录决策，不删除文件）
+    # --------------------------------------------------------
+    def _on_visual_keep(self, g, photo):
+        """保留 photo：同组其余照片标记为待清理候选。"""
+        candidates = [p["path"] for p in g["photos"] if p["path"] != photo["path"]]
+        self._visual.resolve(photo["path"], candidates)
+        self._visual_groups = self._visual.groups()
+        self._rebuild()
+
+    def _on_visual_ignore(self, g):
+        """忽略该组：组内全部两两对记录为忽略（整组不再推荐）。"""
+        paths = [p["path"] for p in g["photos"]]
+        for i in range(len(paths)):
+            for j in range(i + 1, len(paths)):
+                self._visual.ignore_group(paths[i], paths[j])
+        self._visual_groups = self._visual.groups()
+        self._rebuild()
+
+    # --------------------------------------------------------
+    # MD5 区块（原功能原样保留）
+    # --------------------------------------------------------
     def _build_group_card(self, g):
-        """单个重复组卡片。"""
+        """单个 MD5 重复组卡片。"""
         card = QFrame()
         _ga = float(S.get("ui.glass_opacity", 0.55))
         _cr = int(S.get("ui.corner_radius", 18))
@@ -165,7 +420,6 @@ class DuplicatesPage(QWidget):
         lay.setContentsMargins(16, 12, 16, 14)
         lay.setSpacing(10)
 
-        # 组头：完全相同 · MD5 一致 · 共 X 个副本
         head = QHBoxLayout()
         tag = QLabel("完全相同 · MD5 一致")
         tag.setStyleSheet(
@@ -182,7 +436,6 @@ class DuplicatesPage(QWidget):
         head.addWidget(md5s)
         lay.addLayout(head)
 
-        # 副本行
         for item in g["paths"]:
             lay.addWidget(self._build_item_row(g, item))
         return card
@@ -194,14 +447,12 @@ class DuplicatesPage(QWidget):
         h.setContentsMargins(10, 8, 10, 8)
         h.setSpacing(12)
 
-        # 选择框
         cb = QCheckBox()
         cb.setChecked(self._sel.get(item["path"], False))
         cb.toggled.connect(
             lambda checked, p=item["path"]: self._on_toggled(p, checked))
         h.addWidget(cb)
 
-        # 缩略图
         img = QLabel()
         img.setFixedSize(52, 52)
         img.setAlignment(Qt.AlignCenter)
@@ -221,7 +472,6 @@ class DuplicatesPage(QWidget):
             img.setText("🖼")
         h.addWidget(img)
 
-        # 文件名 + 大小 + 路径
         info = QVBoxLayout()
         info.setSpacing(2)
         name = QLabel(item["name"])
@@ -233,7 +483,6 @@ class DuplicatesPage(QWidget):
         info.addWidget(meta)
         h.addLayout(info, 1)
 
-        # 保留按钮
         keep = QPushButton("保留这个")
         keep.setCursor(Qt.PointingHandCursor)
         keep.setStyleSheet(
@@ -248,14 +497,13 @@ class DuplicatesPage(QWidget):
         return row
 
     # --------------------------------------------------------
-    # 交互
+    # MD5 交互
     # --------------------------------------------------------
     def _on_toggled(self, path, checked):
         self._sel[path] = bool(checked)
         self._update_delete_btn()
 
     def _on_keep(self, path, group):
-        """保留这个：取消选中本副本，同组其余全部选中（保一删多）。"""
         self._sel[path] = False
         for item in group["paths"]:
             self._sel[item["path"]] = item["path"] != path
@@ -265,7 +513,6 @@ class DuplicatesPage(QWidget):
         for g in self._groups:
             for item in g["paths"]:
                 self._sel[item["path"]] = True
-        # 安全：每组自动保留最大文件
         self._ensure_keep_one()
         self._rebuild()
 
@@ -276,12 +523,10 @@ class DuplicatesPage(QWidget):
         self._rebuild()
 
     def _ensure_keep_one(self):
-        """安全规则：每组至少保留 1 个（自动取消选中组内最大文件）。"""
         for g in self._groups:
             paths = [item["path"] for item in g["paths"]]
             selected = [p for p in paths if self._sel.get(p)]
             if len(selected) == len(paths):
-                # 保留组内最大文件
                 biggest = max(g["paths"], key=lambda x: x["size"])
                 self._sel[biggest["path"]] = False
 
@@ -289,17 +534,19 @@ class DuplicatesPage(QWidget):
         n = sum(1 for v in self._sel.values() if v)
         self._delete_btn.setEnabled(n > 0)
         self._delete_btn.setText(f"删除选中 ({n})")
+        self._visual_stats.setText(
+            f"候选 {len(self._visual_groups)} 组 · "
+            f"待清理标记 {len(self._visual.pending_cleanup())} 张")
 
     def _delete_selected(self):
         selected = [p for p, v in self._sel.items() if v]
         if not selected:
             return
-        self._ensure_keep_one()   # 双保险
+        self._ensure_keep_one()
         selected = [p for p in selected if self._sel.get(p)]
         if not selected:
             self._rebuild()
             return
-        # 二次确认
         ret = QMessageBox.question(
             self, "确认删除",
             f"确定删除选中的 {len(selected)} 个重复副本？\n\n"
@@ -309,7 +556,6 @@ class DuplicatesPage(QWidget):
         )
         if ret != QMessageBox.Yes:
             return
-        # 只删属于重复组的文件（MD5 安全集合）
         keep_md5 = {g["md5"] for g in self._groups}
         result = self._cleaner.delete_paths(selected, keep_md5_set=keep_md5)
         msg = f"已删除 {len(result['deleted'])} 个副本"
@@ -318,4 +564,4 @@ class DuplicatesPage(QWidget):
         QMessageBox.information(self, "删除完成", msg)
         self.refresh()
         if result["deleted"]:
-            self.data_changed.emit()   # 通知主窗口刷新图库/角色/统计
+            self.data_changed.emit()

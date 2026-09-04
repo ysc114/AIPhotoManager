@@ -32,6 +32,7 @@ AI 照片管理系统：本地 + NAS 照片管理，AI 自动分类、兽装/人
 - **多人合照归属**：同一照片多个 detection 各自独立归组（`(image_path, detection_index)` 复合键）
 - **人工合并角色**：UI 一键合并，永久保留（不因后续聚类被拆散）
 - **疑似同一角色**（角色中心 2.0 · 第二阶段）：跨 Fursee 组相似候选（只读比较，不改 0.79/eps）→ 人工确认才合并；"不是同一角色"判定与最近合并快照存 JSON sidecar（不改 schema），支持撤销最近一次合并
+- **疑似重复照片**（路线图 ②）：视觉相似检测（dHash + 直方图 + 灰度相关性，区别于 MD5 的"内容完全一致"）——连拍/构图相似/轻微糊/曝光不同；AI 只推荐，人工「保留此张/忽略该组」，绝不自动删除（待清理仅标记，落盘 JSON 缓存复用）
 - **角色照片墙**：组内按 `(path, det_idx)` 去重，bbox 主体裁剪作为卡片封面
 - **缩略图优化**：`QImageReader.setClipRect` 先裁后缩 + EXIF 旋转映射，小主体不再模糊
 
@@ -266,6 +267,8 @@ QT_QPA_PLATFORM=offscreen C:/Program Files/Python310/python.exe -m unittest disc
 | `test_detection_aware_ui.py` | 照片墙复合键 / bbox 裁剪渲染（offscreen）|
 | `test_suspect_pairs.py` | 疑似同一角色：候选生成（只读不重聚）/ 不是同一角色持久化 / 合并保真 / 撤销最近合并（temp 库）|
 | `test_suspects_ui.py` | 疑似同一角色 GUI 冒烟（offscreen，只读）|
+| `test_visual_duplicates.py` | 疑似重复照片：dHash/直方图/灰度指纹、分组、MD5 副本隔离、忽略/保留决策持久化（temp）|
+| `test_visual_duplicates_ui.py` | 重复照片页视觉区块 GUI 冒烟（temp，只标记不删除）|
 | `test_legacy_visibility.py` | get_groups 过滤（连接生产库，慎跑）|
 | `test_ai_classifier_cache.py` | 缓存命中（None/{}→重分析，有效→命中）|
 
