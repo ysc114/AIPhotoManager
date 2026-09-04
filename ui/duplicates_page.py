@@ -35,6 +35,45 @@ def _fmt_size(b):
     return f"{b} B"
 
 
+def _apply_thumb(label, cache_path, w, h):
+    """后台缩略图就绪 → 主线程刷新（页面已关闭时静默忽略）。"""
+    if not cache_path or label.parent() is None:
+        return
+    try:
+        from PySide6.QtGui import QPixmap
+        px = QPixmap(cache_path)
+        if px.isNull():
+            return
+        label.setPixmap(px.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+    except Exception as e:
+        print(f"[重复照片] 缩略图刷新失败: {e}")
+
+
+def _load_thumb(label, path, w, h):
+    """读取缩略图：缓存命中直接显示；未命中显示占位并后台生成后刷新。"""
+    cp = None
+    try:
+        cp = thumbnail_cache.get_cached(path, 128)
+    except Exception:
+        cp = None
+    if cp:
+        try:
+            from PySide6.QtGui import QPixmap
+            px = QPixmap(cp)
+            if not px.isNull():
+                label.setPixmap(px.scaled(w, h, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+                return
+        except Exception:
+            pass
+    label.setText("🖼")
+    try:
+        thumbnail_cache.request(
+            path, 128, None,
+            on_ready=lambda c, lab=label, W=w, H=h: _apply_thumb(lab, c, W, H))
+    except Exception:
+        pass
+
+
 class _VisualScanWorker(QThread):
     """后台计算视觉指纹（首次/有新照片时），完成后返回候选组。"""
 
@@ -316,19 +355,7 @@ class DuplicatesPage(QWidget):
         img.setFixedSize(96, 72)
         img.setAlignment(Qt.AlignCenter)
         img.setStyleSheet("background:rgba(240,244,250,0.6);border-radius:8px;border:none;")
-        try:
-            cp = thumbnail_cache.get_cached(item["path"], 128)
-        except Exception:
-            cp = None
-        from PySide6.QtGui import QPixmap
-        if cp:
-            px = QPixmap(cp)
-            if not px.isNull():
-                img.setPixmap(px.scaled(96, 72, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-            else:
-                img.setText("🖼")
-        else:
-            img.setText("🖼")
+        _load_thumb(img, item["path"], 96, 72)
         cl.addWidget(img, 0, Qt.AlignHCenter)
         name = QLabel(item["name"])
         name.setStyleSheet(
@@ -454,19 +481,7 @@ class DuplicatesPage(QWidget):
         img.setFixedSize(72, 72)
         img.setAlignment(Qt.AlignCenter)
         img.setStyleSheet("background:rgba(240,244,250,0.6);border-radius:10px;border:none;")
-        try:
-            cp = thumbnail_cache.get_cached(ph["path"], 128)
-        except Exception:
-            cp = None
-        from PySide6.QtGui import QPixmap
-        if cp:
-            px = QPixmap(cp)
-            if not px.isNull():
-                img.setPixmap(px.scaled(72, 72, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-            else:
-                img.setText("🖼")
-        else:
-            img.setText("🖼")
+        _load_thumb(img, ph["path"], 72, 72)
         h.addWidget(img)
 
         info = QVBoxLayout()
@@ -581,19 +596,7 @@ class DuplicatesPage(QWidget):
         img.setFixedSize(52, 52)
         img.setAlignment(Qt.AlignCenter)
         img.setStyleSheet("background:rgba(240,244,250,0.6);border-radius:8px;border:none;")
-        try:
-            cp = thumbnail_cache.get_cached(item["path"], 128)
-        except Exception:
-            cp = None
-        from PySide6.QtGui import QPixmap
-        if cp:
-            px = QPixmap(cp)
-            if not px.isNull():
-                img.setPixmap(px.scaled(52, 52, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-            else:
-                img.setText("🖼")
-        else:
-            img.setText("🖼")
+        _load_thumb(img, item["path"], 52, 52)
         h.addWidget(img)
 
         info = QVBoxLayout()
