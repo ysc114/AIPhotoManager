@@ -113,6 +113,15 @@ class VisualSearchInfraTests(unittest.TestCase):
         self.assertEqual(vec.dtype, np.float32)
         self.assertAlmostEqual(float(np.linalg.norm(vec)), 1.0, places=4)
 
+    def test_encode_text_dim_and_normalized(self):
+        """文本 embedding：维度/归一化/批量（与图像同一 CLIP 空间）。"""
+        self._maybe_skip_model()
+        v = self.encoder.encode_text("a colorful abstract photo")
+        self.assertEqual(v.shape, (self.model_info["embedding_dimension"],))
+        self.assertAlmostEqual(float(np.linalg.norm(v)), 1.0, places=4)
+        vs = self.encoder.encode_text(["a photo", "a cat"])
+        self.assertEqual(vs.shape, (2, self.model_info["embedding_dimension"]))
+
     # ── 7/8：FAISS 索引建立与加照片 ──
     def test_faiss_index_build_and_persist(self):
         self._maybe_skip_model()
@@ -196,6 +205,24 @@ class VisualSearchInfraTests(unittest.TestCase):
             self.assertEqual(calls["n"], 1, "MD5 重复不触发编码")
         finally:
             self.encoder.encode_batch = orig
+
+    def test_search_by_text_sorted(self):
+        """自然语言搜索：文本 embedding 检索（排序/字段/降序）。"""
+        self._maybe_skip_model()
+        cache = self.dir / "test_text"
+        paths = [self.photos / n for n in
+                 ("base.jpg", "bright.jpg", "shift.jpg", "other.jpg")]
+        idx, _ = self._build_index(cache, paths)
+        res = idx.search_by_text(
+            "a colorful abstract picture with geometric shapes",
+            self.encoder, top_k=5)
+        self.assertGreaterEqual(len(res), 1)
+        sims = [r["similarity"] for r in res]
+        self.assertEqual(sims, sorted(sims, reverse=True), "按相似度降序")
+        for r in res:
+            self.assertIn("photo_id", r)
+            self.assertIn("path", r)
+            self.assertIn("similarity", r)
 
     # ── 8b：模型一致性（换模型不混用）──
     def test_model_mismatch_raises(self):

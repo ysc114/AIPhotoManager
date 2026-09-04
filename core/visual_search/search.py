@@ -39,6 +39,13 @@ def search_by_image(image_path, top_k=20, cache_dir=None, encoder=None):
     return idx.search_by_image(image_path, enc, top_k=top_k)
 
 
+def search_by_text(query_text, top_k=20, cache_dir=None, encoder=None):
+    """自然语言搜索：文本 embedding 检索图片（与图像同一 CLIP 空间）。"""
+    enc = encoder or get_encoder()
+    idx = get_index(cache_dir=cache_dir) if cache_dir else get_index()
+    return idx.search_by_text(query_text, enc, top_k=top_k)
+
+
 def build_photo_index(photos_dir=None, progress_cb=None):
     """扫描照片库并增量建立索引（首次全量、之后只算新照片）。"""
     d = photos_dir or default_photos_dir()

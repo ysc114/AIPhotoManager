@@ -262,6 +262,18 @@ class VisualSearchIndex:
                 break
         return results
 
+    def search_by_text(self, query_text, encoder, top_k=20):
+        """自然语言搜索：文本 embedding（与图像同一 CLIP 空间）→ 索引检索。"""
+        vec = encoder.encode_text(query_text)
+        results = []
+        for entry, sim in self.search(vec, top_k=top_k):
+            results.append({
+                "photo_id": entry["id"],
+                "path": entry["path"],
+                "similarity": round(sim, 4),
+            })
+        return results
+
 
 # 模块级单例
 _index_instance = None

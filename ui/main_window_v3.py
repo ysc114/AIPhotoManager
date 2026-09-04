@@ -164,6 +164,9 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         self._gs_shortcuts = []
         self._gs_recents = []
         self._gs_panel_w = 640
+        # 语义搜索（CLIP 文本）：后台建索引一次后常驻
+        self._sem_building = False
+        self._sem_worker = None
 
         self.init_ui()
 
@@ -1491,16 +1494,76 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         if fav_items:
             sections.append({"title": "⭐ 收藏", "items": fav_items})
 
+        # 🧠 语义搜索（CLIP 文本 embedding → FAISS；第 2 层第二阶段）
+        semantic_items = []
+        try:
+            from core.visual_search import get_encoder, get_index
+            s_idx = get_index()
+            if s_idx.count() > 0:
+                enc = get_encoder()
+                for r in s_idx.search_by_text(q, enc, top_k=4):
+                    semantic_items.append({
+                        "icon": "🧠",
+                        "title": os.path.basename(r["path"]),
+                        "subtitle": f"语义相似 {r['similarity'] * 100:.0f}%",
+                        "badge": "语义",
+                        "payload": {"kind": "photo", "path": r["path"]},
+                    })
+            else:
+                # 索引为空：后台构建一次（幂等），完成后自动刷新结果
+                self._start_semantic_build()
+                semantic_items.append({
+                    "icon": "⏳", "title": "语义索引构建中…（首次）",
+                    "subtitle": "完成后自动刷新结果", "badge": "语义",
+                    "payload": {"kind": "hint"},
+                })
+        except Exception as e:
+            semantic_items.append({
+                "icon": "🧠", "title": "语义搜索暂不可用",
+                "subtitle": str(e)[:60], "badge": "语义",
+                "payload": {"kind": "hint"},
+            })
+        if semantic_items:
+            sections.append({"title": "🧠 语义（CLIP）", "items": semantic_items})
+
         self._global_search.set_results(sections)
+
+    def _start_semantic_build(self):
+        """后台构建/增量更新视觉索引（首次全量，之后增量秒级）。"""
+        if getattr(self, "_sem_building", False):
+            return
+        if getattr(self, "_sem_worker", None) is not None \
+                and self._sem_worker.isRunning():
+            return
+        self._sem_building = True
+        w = _SemanticBuildWorker()
+        w.finished_build.connect(self._on_semantic_build_done)
+        w.failed.connect(self._on_semantic_build_failed)
+        self._sem_worker = w
+        w.start()
+
+    def _on_semantic_build_done(self):
+        self._sem_building = False
+        self._sem_worker = None
+        # 索引就绪：用当前查询重新渲染（自动出现语义结果）
+        if self._global_search is not None and self._global_search.isVisible():
+            self._on_global_search_query(self._global_search.query())
+
+    def _on_semantic_build_failed(self, err):
+        self._sem_building = False
+        self._sem_worker = None
+        print(f"[语义搜索] 索引构建失败: {err}")
 
     def _on_global_result_selected(self, item):
         """结果打开：角色 → 角色详情；照片/收藏/文件 → 照片页预览。"""
         payload = item.get("payload") or {}
         title = str(item.get("title") or "").strip()
+        kind = payload.get("kind")
+        if kind == "hint":
+            return  # 提示行不可打开
         if title:
             self._gs_recents = [title] + [r for r in self._gs_recents if r != title]
             self._gs_recents = self._gs_recents[:8]
-        kind = payload.get("kind")
         if kind == "character" and payload.get("group"):
             self._open_group_from_search(payload["group"])
         elif payload.get("path"):
@@ -2493,5 +2556,32 @@ class _SimilarSearchWorker(QThread):
                 progress_cb=lambda c, t: self.progress_updated.emit(c, t))
             results = index.search_by_image(self._path, encoder, top_k=20)
             self.done_sig.emit(results)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+class _SemanticBuildWorker(QThread):
+    """后台构建/增量更新视觉索引（语义搜索前置；不触碰 identity_db）。"""
+
+    finished_build = Signal()
+    failed = Signal(str)
+
+    _EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+
+    def run(self):
+        import os
+        try:
+            from core.visual_search import get_encoder, get_index
+            from core.visual_search.search import default_photos_dir
+            photos_dir = default_photos_dir()
+            files = []
+            if os.path.isdir(photos_dir):
+                files = sorted(
+                    os.path.join(photos_dir, n) for n in os.listdir(photos_dir)
+                    if os.path.splitext(n)[1].lower() in self._EXTS
+                )
+            index = get_index()
+            index.add_images(files, get_encoder())
+            self.finished_build.emit()
         except Exception as e:
             self.failed.emit(str(e))

@@ -137,6 +137,25 @@ class ClipImageEncoder:
                 progress_cb(i + 1, len(paths))
         return out
 
+    def encode_text(self, texts, normalize=True):
+        """文本 → L2 归一化向量（自然语言搜索，与图像同一 CLIP 空间）。
+
+        texts: str 或 [str]。返回 (n, dim) numpy 或单条 (dim,)。
+        """
+        self._ensure_loaded()
+        import torch
+        import open_clip
+        single = isinstance(texts, str)
+        items = [texts] if single else list(texts)
+        tokenizer = open_clip.get_tokenizer(self.model_name)
+        tokens = tokenizer(items).to(self.device)
+        with torch.no_grad():
+            feat = self._model.encode_text(tokens)
+            if normalize:
+                feat = feat / feat.norm(dim=-1, keepdim=True)
+        arr = feat.cpu().numpy().astype(np.float32)
+        return arr[0] if single else arr
+
     def close(self):
         """释放模型（测试/进程退出用）。"""
         if self._model is not None:

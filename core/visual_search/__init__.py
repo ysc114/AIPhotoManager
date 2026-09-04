@@ -19,11 +19,13 @@ from core.visual_search.index import (
     VisualSearchIndex, VisualSearchModelMismatch, get_index, reset_index,
 )
 from core.visual_search.search import (
-    add_image, add_images, build_photo_index, search_by_image, reset,
+    add_image, add_images, build_photo_index, search_by_image, search_by_text,
+    reset,
 )
 
 __all__ = [
     "ClipImageEncoder", "get_encoder", "reset_encoder", "resolve_device",
     "VisualSearchIndex", "VisualSearchModelMismatch", "get_index", "reset_index",
-    "add_image", "add_images", "build_photo_index", "search_by_image", "reset",
+    "add_image", "add_images", "build_photo_index", "search_by_image",
+    "search_by_text", "reset",
 ]
