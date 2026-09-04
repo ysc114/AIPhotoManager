@@ -18,8 +18,11 @@
    （由 MD5 页处理），避免两处重复显示
 
 相似度规则（经验阈值，DEFAULT 常量便于校准）：
-- combined = 0.70 * dhash_sim + 0.30 * color_sim
+- combined = 0.45*dhash + 0.25*color + 0.30*gray（灰度结构相关性，曝光鲁棒）
 - combined >= 0.86 或 dhash_sim >= 0.90 → 疑似同一"场景/连拍"候选组
+
+路线图 ③：search_similar(query, top_k) —— 给定一张照片，返回库内
+视觉最相似的 N 张（同场景/同角色/连拍），只读、不改任何数据。
 
 缓存与决策：
 - visual_similarity.json（项目根，gitignore）：
@@ -474,6 +477,34 @@ class VisualDuplicateIndex:
         for rec in self._resolved.values():
             out.update(rec.get("candidates", []))
         return sorted(out)
+
+
+    # ---------- ③ 相似照片搜索（给定一张 → 找库内最相似） ----------
+
+    def search_similar(self, query_path, top_k=12, min_sim=0.55):
+        """检索与 query_path 视觉最相似的照片（纯只读，不修改任何数据）。
+
+        query 未入索引时现场计算指纹（不落盘索引）。
+        返回: [ {path,name,size,sharp,exposure,w,h,score}, ... ]
+        按相似度降序，最多 top_k 张。
+        """
+        qp = norm_path(query_path)
+        q = self._files.get(qp) or compute_fingerprint(query_path)
+        if not q or q.get("dhash") is None:
+            return []
+        results = []
+        for p, fp in self._files.items():
+            if p == qp or fp.get("dhash") is None:
+                continue
+            sim = combined_sim(q["dhash"], q["hist"], fp["dhash"], fp["hist"],
+                               q.get("gray"), fp.get("gray"))
+            if sim < min_sim:
+                continue
+            item = self._photo_item(p)
+            item["score"] = round(sim, 4)
+            results.append(item)
+        results.sort(key=lambda r: -r["score"])
+        return results[:max(0, int(top_k))]
 
 
 # 模块级默认索引（项目根）

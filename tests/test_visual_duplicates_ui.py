@@ -109,5 +109,25 @@ class VisualDuplicatesUiTests(unittest.TestCase):
         self.assertEqual(idx2.groups(), [], "重启后被忽略的组仍不推荐")
 
 
+    def test_similar_search_section(self):
+        """③ 相似照片搜索区块：选择查询 → 结果网格渲染（只读）。"""
+        self._wait_scan()
+        pick_btn = [b for b in self.page.findChildren(QPushButton)
+                    if b.text() == "📂 选择照片"]
+        self.assertEqual(len(pick_btn), 1)
+        self.page._run_similar_search(str(self.photos / "base.jpg"))
+        settle(self.app, 6)
+        self.assertGreaterEqual(len(self.page._similar_results), 2)
+        names = [r["name"] for r in self.page._similar_results]
+        self.assertIn("bright.jpg", names)
+        self.assertNotIn("base.jpg", names)
+        score_labels = [l for l in self.page.findChildren(QLabel)
+                        if l.text().startswith("相似 ")]
+        self.assertGreaterEqual(len(score_labels), 1)
+        query_labels = [l for l in self.page.findChildren(QLabel)
+                        if "base.jpg" in l.text()]
+        self.assertGreaterEqual(len(query_labels), 1)
+
+
 if __name__ == "__main__":
     unittest.main()

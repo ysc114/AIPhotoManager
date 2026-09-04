@@ -13,11 +13,12 @@ MD5 删除仍走 core.duplicates.DuplicateCleaner（只清理该文件自身记�
 """
 
 import os
+from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal, QThread
 from PySide6.QtWidgets import (
-    QWidget, QLabel, QVBoxLayout, QHBoxLayout, QScrollArea,
-    QCheckBox, QFrame, QPushButton, QMessageBox,
+    QWidget, QLabel, QVBoxLayout, QHBoxLayout, QScrollArea, QGridLayout,
+    QCheckBox, QFrame, QPushButton, QMessageBox, QFileDialog,
 )
 
 from core.duplicates import DuplicateScanner, DuplicateCleaner
@@ -70,6 +71,8 @@ class DuplicatesPage(QWidget):
         self._sel = {}               # 绝对路径 -> 是否选中（删除）
         self._visual_groups = []     # 视觉候选组
         self._visual_worker = None
+        self._similar_query = ""     # ③ 相似搜索当前查询照片
+        self._similar_results = []   # ③ 相似搜索结果
 
         self._build_ui()
         self.refresh()
@@ -218,6 +221,9 @@ class DuplicatesPage(QWidget):
             if w:
                 w.deleteLater()
 
+        # ── ③ 🔎 相似照片搜索（给定一张 → 库内最相似 N 张）──
+        self._cards_layout.addWidget(self._build_search_section())
+
         # ── ⑵ 👀 疑似重复（视觉相似）──
         self._cards_layout.addWidget(self._build_visual_section())
 
@@ -239,6 +245,124 @@ class DuplicatesPage(QWidget):
                 self._cards_layout.addWidget(self._build_group_card(g))
         self._cards_layout.addStretch(1)
         self._update_delete_btn()
+
+    # --------------------------------------------------------
+    # ③ 🔎 相似照片搜索区块
+    # --------------------------------------------------------
+    def _build_search_section(self):
+        frame = QFrame()
+        _ga = float(S.get("ui.glass_opacity", 0.55))
+        _cr = int(S.get("ui.corner_radius", 18))
+        frame.setStyleSheet(f"""
+            QFrame {{
+                background: rgba(255,255,255,{max(0.3, _ga - 0.18)});
+                border: 1px solid rgba(255,255,255,0.8);
+                border-radius: {_cr}px;
+            }}
+        """)
+        lay = QVBoxLayout(frame)
+        lay.setContentsMargins(16, 12, 16, 12)
+        lay.setSpacing(10)
+
+        head = QHBoxLayout()
+        tag = QLabel("🔎 相似照片搜索")
+        tag.setStyleSheet(
+            "font-size:12px;color:#0f9d8a;background:rgba(80,210,190,0.16);"
+            "border-radius:9px;padding:3px 10px;border:none;font-weight:700;")
+        head.addWidget(tag)
+        hint = QLabel("选一张照片 → 找出同场景/同角色/连拍的最相似照片")
+        hint.setStyleSheet("font-size:11px;color:#8a97a8;background:transparent;border:none;")
+        head.addWidget(hint)
+        head.addStretch(1)
+        pick = QPushButton("📂 选择照片")
+        pick.setCursor(Qt.PointingHandCursor)
+        pick.setStyleSheet(
+            "QPushButton{background:rgba(80,210,190,0.18);color:#0f9d8a;border:none;"
+            "padding:5px 14px;border-radius:12px;font-size:11.5px;font-weight:700;}"
+            "QPushButton:hover{background:rgba(80,210,190,0.30);}")
+        pick.clicked.connect(self._on_pick_similar)
+        head.addWidget(pick)
+        lay.addLayout(head)
+
+        status = QLabel(
+            f"查询：{os.path.basename(self._similar_query)}" if self._similar_query else
+            "尚未选择照片")
+        status.setStyleSheet("font-size:11px;color:#6b7a90;background:transparent;border:none;")
+        lay.addWidget(status)
+
+        if not self._similar_results:
+            empty = QLabel("点击「📂 选择照片」开始（不会修改任何数据）")
+            empty.setStyleSheet(
+                "font-size:12px;color:#a5b2c2;padding:6px 0;background:transparent;border:none;")
+            lay.addWidget(empty)
+            return frame
+
+        grid = QGridLayout()
+        grid.setSpacing(10)
+        for i, item in enumerate(self._similar_results[:12]):
+            grid.addWidget(self._build_similar_card(item), i // 4, i % 4)
+        lay.addLayout(grid)
+        return frame
+
+    def _build_similar_card(self, item):
+        card = QFrame()
+        card.setFixedSize(150, 132)
+        card.setStyleSheet(
+            "QFrame{background:rgba(255,255,255,0.5);border-radius:12px;border:none;}")
+        cl = QVBoxLayout(card)
+        cl.setContentsMargins(8, 8, 8, 8)
+        cl.setSpacing(4)
+        img = QLabel()
+        img.setFixedSize(96, 72)
+        img.setAlignment(Qt.AlignCenter)
+        img.setStyleSheet("background:rgba(240,244,250,0.6);border-radius:8px;border:none;")
+        try:
+            cp = thumbnail_cache.get_cached(item["path"], 128)
+        except Exception:
+            cp = None
+        from PySide6.QtGui import QPixmap
+        if cp:
+            px = QPixmap(cp)
+            if not px.isNull():
+                img.setPixmap(px.scaled(96, 72, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            else:
+                img.setText("🖼")
+        else:
+            img.setText("🖼")
+        cl.addWidget(img, 0, Qt.AlignHCenter)
+        name = QLabel(item["name"])
+        name.setStyleSheet(
+            "font-size:10.5px;font-weight:600;color:#33445c;background:transparent;border:none;")
+        name.setToolTip(item["path"])
+        from PySide6.QtGui import QFontMetrics
+        fm = QFontMetrics(name.font())
+        name.setText(fm.elidedText(item["name"], Qt.ElideMiddle, 132))
+        cl.addWidget(name)
+        score = QLabel(f"相似 {item['score'] * 100:.0f}%")
+        score.setStyleSheet(
+            "font-size:10.5px;color:#0f9d8a;font-weight:700;background:transparent;border:none;")
+        cl.addWidget(score)
+        return card
+
+    def _on_pick_similar(self):
+        default_dir = self._photos_dir or str(
+            Path(__file__).resolve().parent.parent / "photos")
+        path, _ = QFileDialog.getOpenFileName(
+            self, "选择照片（找相似）", default_dir,
+            "图片 (*.jpg *.jpeg *.png *.webp)")
+        if path:
+            self._run_similar_search(path)
+
+    def _run_similar_search(self, query_path):
+        """同步检索（指纹已索引或现场计算，~200 张毫秒级），重建区块。"""
+        from core.visual_duplicates import norm_path
+        self._similar_query = norm_path(query_path)
+        try:
+            self._similar_results = self._visual.search_similar(query_path) or []
+        except Exception as e:
+            print(f"[相似搜索] 失败: {e}")
+            self._similar_results = []
+        self._rebuild()
 
     # --------------------------------------------------------
     # 👀 视觉相似区块

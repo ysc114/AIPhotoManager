@@ -153,6 +153,28 @@ class VisualFingerprintTests(unittest.TestCase):
             self.assertFalse(
                 {"base.jpg", "bright.jpg"} <= names, "被忽略的对不应再推荐")
 
+    def test_search_similar(self):
+        """③ 相似照片搜索：给定一张 → 库内最相似 N 张（排除自身/可按阈值）。"""
+        idx = VisualDuplicateIndex(photos_dir=str(self.dir),
+                                   index_path=str(self.dir / "vis.json"))
+        idx.compute_all()
+        res = idx.search_similar(self.base, top_k=5, min_sim=0.5)
+        names = [r["name"] for r in res]
+        self.assertNotIn("base.jpg", names, "查询照片自身不参与结果")
+        self.assertIn("bright.jpg", names, "曝光变体应命中")
+        self.assertIn("shift.jpg", names, "平移变体应命中")
+        self.assertEqual(res[0]["score"], max(r["score"] for r in res))
+        top3 = names[:3]
+        self.assertNotIn("other.jpg", top3, "不同场景不应排进前三")
+        # 高阈值只留强命中（copy 完全一致 1.0 / shift ≈0.94）
+        strict = idx.search_similar(self.base, top_k=5, min_sim=0.93)
+        self.assertEqual(len(strict), 2)
+        # 未入索引的查询照片：现场计算指纹也能搜
+        newp = make_scene(str(self.dir / "query_outside.jpg"), brightness=1.05)
+        res2 = idx.search_similar(newp, top_k=3, min_sim=0.5)
+        self.assertGreaterEqual(len(res2), 1)
+        self.assertIn("base.jpg", [r["name"] for r in res2])
+
     def test_stale_and_corrupt(self):
         idx = VisualDuplicateIndex(photos_dir=str(self.dir),
                                    index_path=str(self.dir / "vis.json"))
