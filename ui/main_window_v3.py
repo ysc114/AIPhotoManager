@@ -261,12 +261,15 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         top_row = QHBoxLayout()
         top_row.setSpacing(10)
         top_row.addWidget(self.search_bar, 1)
-        self.gs_btn = QPushButton("🔍 搜索  Ctrl+K")
+        # Spotlight 面板入口：紧凑圆形图标钮（悬停提示；Ctrl+K 亦可）
+        self.gs_btn = QPushButton("🔍")
+        self.gs_btn.setFixedSize(40, 40)
         self.gs_btn.setCursor(Qt.PointingHandCursor)
+        self.gs_btn.setToolTip("全局搜索（Ctrl+K）")
         self.gs_btn.setStyleSheet(
             "QPushButton{background:rgba(255,255,255,0.7);color:#3a5a7a;"
-            "border:1px solid rgba(255,255,255,0.9);padding:7px 14px;"
-            "border-radius:15px;font-size:12px;font-weight:600;}"
+            "border:1px solid rgba(255,255,255,0.9);border-radius:20px;"
+            "font-size:16px;}"
             "QPushButton:hover{background:rgba(255,255,255,0.95);}"
         )
         self.gs_btn.clicked.connect(self._toggle_global_search)
