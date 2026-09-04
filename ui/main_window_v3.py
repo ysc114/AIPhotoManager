@@ -891,6 +891,11 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
             "🎬 视频抽帧"
         )
 
+        # 🔎 查找相似照片（智能搜索第 2 层 · 视觉 Embedding + FAISS）
+        self.btn_similar = QPushButton(
+            "🔎 查找相似照片"
+        )
+
         button_layout.addWidget(
             self.btn_open
         )
@@ -913,6 +918,10 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
 
         button_layout.addWidget(
             self.btn_video
+        )
+
+        button_layout.addWidget(
+            self.btn_similar
         )
 
         right.addLayout(
@@ -1357,6 +1366,10 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
             self.extract_video_frames
         )
 
+        self.btn_similar.clicked.connect(
+            self._find_similar_photos
+        )
+
         self.btn_refresh_overview.clicked.connect(
             self._refresh_overview
         )
@@ -1489,6 +1502,62 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
             self._open_group_from_search(payload["group"])
         elif payload.get("path"):
             self._open_photo_by_path(payload["path"])
+
+    # ------------------------------------------------------------
+    # 🔎 查找相似照片（视觉 Embedding + FAISS，后台线程；智能搜索第 2 层）
+    # ------------------------------------------------------------
+    def _find_similar_photos(self):
+        worker = getattr(self, "_similar_worker", None)
+        if worker is not None and worker.isRunning():
+            self.statusBar().showMessage("相似照片搜索已在进行中…", 3000)
+            return
+        path = self.current_image_path
+        if not path and self.image_list:
+            row = self.image_list_widget.currentRow()
+            path = self.image_list[row] if 0 <= row < len(self.image_list) \
+                else self.image_list[0]
+        if not path or not os.path.exists(path):
+            QMessageBox.information(self, "查找相似照片",
+                                    "请先在照片页打开一张照片。")
+            return
+        self.statusBar().showMessage(
+            "正在建立/更新视觉索引并搜索…（首次全量较慢，之后增量秒级）")
+        w = _SimilarSearchWorker(path)
+        w.progress_updated.connect(self._on_similar_progress)
+        w.done_sig.connect(self._on_similar_done)
+        w.failed.connect(self._on_similar_failed)
+        self._similar_worker = w
+        w.start()
+
+    def _on_similar_progress(self, cur, total):
+        self.statusBar().showMessage(f"视觉索引 {cur}/{total}…", 1000)
+
+    def _on_similar_done(self, results):
+        self._similar_worker = None
+        if not results:
+            QMessageBox.information(self, "查找相似照片",
+                                    "没有找到相似照片（索引可能为空）。")
+            return
+        paths = [r["path"] for r in results]
+        self.image_list = paths
+        self.image_list_widget.clear()
+        for i, p in enumerate(paths):
+            item = QListWidgetItem(
+                os.path.basename(p)
+                + f"  · 相似 {results[i]['similarity'] * 100:.0f}%")
+            pix = QPixmap(p)
+            if not pix.isNull():
+                item.setIcon(QIcon(pix.scaled(
+                    110, 110, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
+            self.image_list_widget.addItem(item)
+        self.image_list_widget.setCurrentRow(0)
+        self.show_preview(0)
+        self.statusBar().showMessage(
+            f"找到 {len(paths)} 张相似照片（视觉搜索）", 8000)
+
+    def _on_similar_failed(self, err):
+        self._similar_worker = None
+        QMessageBox.critical(self, "查找相似照片失败", str(err))
 
     def open_folder(self):
 
@@ -2384,3 +2453,42 @@ class PhotoQualityWorker(QThread):
         except Exception as e:
             print(f"[AI精选] 分析失败: {e}")
             self.finished.emit(self._role_key, None)
+
+
+class _SimilarSearchWorker(QThread):
+    """后台执行「以图搜图」：增量建索引（首次全量）→ search_by_image。
+
+    只读照片 + 写 cache/visual_search 独立索引，不触碰 identity_db。
+    """
+
+    progress_updated = Signal(int, int)   # (done, total)
+    done_sig = Signal(object)             # [ {photo_id, path, similarity}, ... ]
+    failed = Signal(str)
+
+    _EXTS = {".jpg", ".jpeg", ".png", ".webp"}
+
+    def __init__(self, query_path, parent=None):
+        super().__init__(parent)
+        self._path = query_path
+
+    def run(self):
+        import os
+        try:
+            from core.visual_search import get_encoder, get_index
+            from core.visual_search.search import default_photos_dir
+            photos_dir = default_photos_dir()
+            files = []
+            if os.path.isdir(photos_dir):
+                files = sorted(
+                    os.path.join(photos_dir, n) for n in os.listdir(photos_dir)
+                    if os.path.splitext(n)[1].lower() in self._EXTS
+                )
+            encoder = get_encoder()
+            index = get_index()
+            index.add_images(
+                files, encoder,
+                progress_cb=lambda c, t: self.progress_updated.emit(c, t))
+            results = index.search_by_image(self._path, encoder, top_k=20)
+            self.done_sig.emit(results)
+        except Exception as e:
+            self.failed.emit(str(e))
