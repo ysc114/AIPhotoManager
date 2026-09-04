@@ -718,18 +718,24 @@ class IdentityManager:
                 # L1 路由统计（与 _process_single_image 内部一致；缓存命中）
                 l1_info = self.embedder.get_l1_info(path)
                 route = self.embedder.route_l1(l1_info)
+                status_msg = os.path.basename(path)
                 if route == "fursuit":
                     n_fursuit += 1
+                    # Fursee 引擎启动/模型加载会阻塞本线程最长 240s：
+                    # 提前把状态同步给 UI，避免进度条"卡住"像死机
+                    adapter = getattr(self, "_fursee_adapter", None)
+                    if adapter is None or getattr(adapter, "state", "ready") != "ready":
+                        status_msg = "正在启动 Fursee 识别引擎（首次约 1 分钟）…"
                 elif route == "person":
                     n_person += 1
                 else:
                     n_other += 1
+                if progress_callback:
+                    progress_callback(i, total, status_msg)
                 self._process_single_image(path)
             except Exception as e:
                 failed += 1
                 print(f"[analyze_paths] 失败 {os.path.basename(path)}: {e}")
-            if progress_callback:
-                progress_callback(i, total, os.path.basename(path))
 
         joined_fursee = created_fursee = 0
         joined_face = created_face = 0

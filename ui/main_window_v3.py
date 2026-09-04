@@ -2453,6 +2453,9 @@ class _AnalyzeWorker(QThread):
         from core.identity import IdentityManager
         mgr = IdentityManager()
         try:
+            self.progress_updated.emit(
+                0, len(self._paths),
+                "准备中：加载 AI 模型（CLIP / Fursee 首次约 1 分钟）…")
             result = mgr.analyze_paths(
                 self._paths,
                 progress_callback=lambda i, t, s: self.progress_updated.emit(i, t, s),
@@ -2483,6 +2486,9 @@ class _ScanDirWorker(QThread):
         from core.identity import IdentityManager
         mgr = IdentityManager()
         try:
+            self.progress_updated.emit(
+                0, 0,
+                "准备中：加载 AI 模型（CLIP / Fursee 首次约 1 分钟）…")
             result = mgr.analyze_new_photos(
                 progress_callback=lambda i, t: self.progress_updated.emit(i, t, ""),
             )
