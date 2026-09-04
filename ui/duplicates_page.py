@@ -420,6 +420,16 @@ class DuplicatesPage(QWidget):
         head.addWidget(hint)
         head.addStretch(1)
         pending = self._visual.pending_cleanup()
+        self._cleanup_btn = QPushButton(f"🗑 清理已标记 ({len(pending)})")
+        self._cleanup_btn.setCursor(Qt.PointingHandCursor)
+        self._cleanup_btn.setEnabled(bool(pending))
+        self._cleanup_btn.setStyleSheet(
+            "QPushButton{background:#e8707e;color:white;border:none;"
+            "padding:5px 14px;border-radius:12px;font-size:11.5px;font-weight:700;}"
+            "QPushButton:hover{background:#dd5f6e;}"
+            "QPushButton:disabled{background:rgba(220,220,225,0.7);color:#a0aab8;}")
+        self._cleanup_btn.clicked.connect(self._on_cleanup_marked)
+        head.addWidget(self._cleanup_btn)
         self._visual_stats.setText(
             f"候选 {len(self._visual_groups)} 组 · 待清理标记 {len(pending)} 张")
         lay.addLayout(head)
@@ -539,6 +549,41 @@ class DuplicatesPage(QWidget):
                 self._visual.ignore_group(paths[i], paths[j])
         self._visual_groups = self._visual.groups()
         self._rebuild()
+
+    # --------------------------------------------------------
+    # 🗑 清理已标记待清理（人工确认后删除；同步索引/数据库/缓存）
+    # --------------------------------------------------------
+    def _on_cleanup_marked(self):
+        candidates = self._visual.pending_cleanup()
+        if not candidates:
+            return
+        ret = QMessageBox.question(
+            self, "确认清理",
+            f"删除 {len(candidates)} 张已标记「待清理」的照片？\n\n"
+            "· 每张都是你「保留此张」确认过：同组保留的那张不会删除\n"
+            "· 删除文件并同步清理对应照片记录（不影响角色分组/合照归属）\n"
+            "· 不可恢复",
+            QMessageBox.Yes | QMessageBox.No, QMessageBox.No,
+        )
+        if ret != QMessageBox.Yes:
+            return
+        result = self._commit_cleanup(candidates)
+        msg = f"已删除 {len(result['deleted'])} 张"
+        if result["failed"]:
+            msg += f" · {len(result['failed'])} 张失败（未删除）"
+        QMessageBox.information(self, "清理完成", msg)
+        self.refresh()
+        if result["deleted"]:
+            self.data_changed.emit()
+
+    def _commit_cleanup(self, candidates):
+        """执行清理：删除文件 + 记录清理 + 视觉索引条目移除（可测试入口）。"""
+        result = self._cleaner.delete_paths(candidates)
+        try:
+            self._visual.remove_entries(result["deleted"])
+        except Exception as e:
+            print(f"[重复照片] 视觉索引清理失败: {e}")
+        return result
 
     # --------------------------------------------------------
     # MD5 区块（原功能原样保留）

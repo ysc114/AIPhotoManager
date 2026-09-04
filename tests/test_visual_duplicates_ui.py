@@ -87,6 +87,29 @@ class VisualDuplicatesUiTests(unittest.TestCase):
                   if "已标记待清理" in l.text()]
         self.assertGreaterEqual(len(labels), 1)
 
+    def test_cleanup_marked_deletes_with_keep(self):
+        """清理已标记：只删候选（保留照片不动），索引/决策同步更新。"""
+        self._wait_scan()
+        groups = self.page._visual_groups
+        top = groups[0]
+        kept_photo = top["photos"][0]["path"]
+        candidates = [p["path"] for p in top["photos"][1:]]
+        self.page._visual.resolve(kept_photo, candidates)
+        # 清理按钮可用（重建后反映数量）
+        self.page._rebuild()
+        btn = getattr(self.page, "_cleanup_btn", None)
+        self.assertIsNotNone(btn)
+        self.assertTrue(btn.isEnabled())
+        # 执行清理（跳过确认弹窗，直接走可测试入口）
+        result = self.page._commit_cleanup(candidates)
+        self.assertEqual(len(result["deleted"]), len(candidates))
+        for p in candidates:
+            self.assertFalse(os.path.exists(p), "候选文件应被删除")
+        self.assertTrue(os.path.exists(kept_photo), "保留照片不得删除")
+        self.assertEqual(self.page._visual.pending_cleanup(), [])
+        self.assertEqual(len(self.page._visual._files), 4 - len(candidates),
+                         "索引移除候选条目")
+
     def test_ignore_group_removes_candidate(self):
         self._wait_scan()
         groups = self.page._visual_groups

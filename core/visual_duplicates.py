@@ -478,6 +478,31 @@ class VisualDuplicateIndex:
             out.update(rec.get("candidates", []))
         return sorted(out)
 
+    def remove_entries(self, paths):
+        """从索引移除已删除文件的条目（文件删除后调用）。
+
+        本类为指纹索引（_files dict）；移除后落盘，
+        同时清理 resolved 中已消失的候选路径。返回移除条数。
+        """
+        gone = {norm_path(p) for p in paths}
+        removed = 0
+        for p in list(self._files):
+            if p in gone:
+                del self._files[p]
+                removed += 1
+        if removed:
+            self.save()
+        # resolved：已消失的候选路径移除（保留照片不动）
+        changed = False
+        for key, rec in list(self._resolved.items()):
+            cands = [c for c in rec.get("candidates", []) if os.path.exists(c)]
+            if len(cands) != len(rec.get("candidates", [])):
+                rec["candidates"] = cands
+                changed = True
+        if changed:
+            self.save()
+        return removed
+
 
     # ---------- ③ 相似照片搜索（给定一张 → 找库内最相似） ----------
 
