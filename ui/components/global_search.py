@@ -129,16 +129,27 @@ class GlobalSearchPanel(QWidget):
         self._debounce.setInterval(120)
         self._debounce.timeout.connect(self._emit_request)
 
-        # 内容包裹层：淡入淡出作用于全部子内容（面板自身保留投影效果）
+        # 内容包裹层：淡入淡出仅在动画期间挂效果（常驻会模糊文字）
         self._body = QWidget(self)
         self._body.setGeometry(self.rect())
         self._body_eff = None
-        from PySide6.QtWidgets import QGraphicsOpacityEffect
-        self._body_eff = QGraphicsOpacityEffect(self._body)
-        self._body.setGraphicsEffect(self._body_eff)
 
         self._build_ui()
         self.hide()
+
+    def _ensure_fade(self):
+        """动画期间给内容挂透明效果；完成后移除（保持文字锐利）。"""
+        if self._body_eff is None:
+            from PySide6.QtWidgets import QGraphicsOpacityEffect
+            self._body_eff = QGraphicsOpacityEffect(self._body)
+            self._body.setGraphicsEffect(self._body_eff)
+        return self._body_eff
+
+    def _drop_fade(self):
+        """移除透明效果：稳态下文字/图片零模糊。"""
+        if self._body_eff is not None:
+            self._body.setGraphicsEffect(None)
+            self._body_eff = None
 
     # --------------------------------------------------------
     # UI
@@ -210,6 +221,7 @@ class GlobalSearchPanel(QWidget):
         self._sel = -1
         self.raise_()
         self.show()
+        self._ensure_fade()
         self.input.setFocus()
         self._animate(0.0, 1.0, 14.0)
         if S.get("nav.aurora", True):
@@ -220,6 +232,7 @@ class GlobalSearchPanel(QWidget):
         self._timer.stop()
         if self._anim is not None and self._anim.state() == QVariantAnimation.Running:
             self._anim.stop()
+        self._ensure_fade()
         self._animate(1.0, 0.0, 0.0)
 
     def is_visible(self):
@@ -252,6 +265,8 @@ class GlobalSearchPanel(QWidget):
         if self._opacity <= 0.01:
             self.hide()
             self.closed.emit()
+        else:
+            self._drop_fade()   # 稳态：无透明效果，文字/图片零模糊
 
     # --------------------------------------------------------
     # 数据接口（只渲染，不查询）
@@ -418,11 +433,11 @@ class GlobalSearchPanel(QWidget):
         p.setRenderHint(QPainter.Antialiasing, True)
         p.setOpacity(max(0.0, min(1.0, self._opacity)))
         rect = QRectF(self.rect()).adjusted(1, 1, -1, -1)
-        # 玻璃底
+        # 玻璃底（近实底：背后内容不穿透，避免"全糊"）
         grad = QLinearGradient(0, 0, 0, rect.height())
-        grad.setColorAt(0.0, QColor(252, 253, 255, 238))
-        grad.setColorAt(0.6, QColor(244, 248, 255, 216))
-        grad.setColorAt(1.0, QColor(228, 236, 250, 210))
+        grad.setColorAt(0.0, QColor(252, 253, 255, 250))
+        grad.setColorAt(0.6, QColor(246, 250, 255, 246))
+        grad.setColorAt(1.0, QColor(236, 243, 252, 242))
         p.setBrush(grad)
         p.setPen(QPen(QColor(255, 255, 255, 200), 1.2))
         p.drawRoundedRect(rect, PANEL_RADIUS, PANEL_RADIUS)

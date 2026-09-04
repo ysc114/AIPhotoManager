@@ -220,10 +220,12 @@ class GlassSearchBar(QWidget):
         # 结果面板（浮动，由主窗口定位）
         self._panel = QListWidget()
         self._panel.setWindowFlags(Qt.Tool | Qt.FramelessWindowHint)
+        # WA_TranslucentBackground 仅用于圆角裁切；内部用实底避免
+        # 底部内容透出导致"全糊在一起"（此前 rgba alpha 238 仍透底）
         self._panel.setAttribute(Qt.WA_TranslucentBackground)
         self._panel.setStyleSheet(
-            "QListWidget{background:rgba(248,250,255,238);border:1px solid "
-            "rgba(255,255,255,0.85);border-radius:16px;"
+            "QListWidget{background:#f7f9fd;border:1px solid "
+            "rgba(255,255,255,0.92);border-radius:16px;"
             "outline:none;padding:6px;}"
             "QListWidget::item{background:transparent;border-radius:12px;}"
             "QListWidget::item:hover{background:rgba(130,170,255,0.18);}"
