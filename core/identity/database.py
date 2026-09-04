@@ -40,6 +40,14 @@ class IdentityDatabase:
         self.conn = sqlite3.connect(self.db_path)
         self.conn.execute("PRAGMA journal_mode=WAL")
         self.conn.execute("PRAGMA foreign_keys=OFF")
+        # 启动自检（2026-09-04）：上次异常退出可能留下 -wal/-shm 残留，
+        # 多会话状态下 SQLite 会把连接降级为只读 → "attempt to write a
+        # readonly database"。打开新连接时主动 checkpoint 一次（TRUNCATE），
+        # 合并残留并重置 WAL 状态；忙/失败不阻断启动（只打印）。
+        try:
+            self.conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        except Exception as e:
+            print(f"[IdentityDatabase] 启动 WAL checkpoint 失败（忽略）：{e}")
         self._create_tables()
         self._migrate_add_columns()
         self._migrate_schema_v2()
