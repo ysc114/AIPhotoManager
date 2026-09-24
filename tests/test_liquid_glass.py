@@ -64,6 +64,8 @@ class AuroraGlassCardLiquidGlassTests(unittest.TestCase):
     def setUp(self):
         self.orig_a = S.get("aurora")
         self.orig_g = S.get("glass")
+        self.orig_perf = S.get("ui.perf_mode")
+        S.set("ui.perf_mode", False)   # 性能模式会全局关闭折射，测试固定基线
         S.set("glass.enabled", True)
         S.set("glass.mouse_follow", True)
         S.set("aurora.enabled", True)
@@ -88,6 +90,7 @@ class AuroraGlassCardLiquidGlassTests(unittest.TestCase):
             S.set(f"aurora.{k}", v)
         for k, v in self.orig_g.items():
             S.set(f"glass.{k}", v)
+        S.set("ui.perf_mode", bool(self.orig_perf))
         self.host.close()
 
     def test_glass_active_by_default(self):

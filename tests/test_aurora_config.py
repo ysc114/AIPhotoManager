@@ -53,7 +53,8 @@ class AuroraSettingsTests(unittest.TestCase):
         self.assertIsInstance(a, dict)
         for k in _AURORA_KEYS:
             self.assertIn(k, a, f"aurora 缺少键 {k}")
-        self.assertIs(a["enabled"], True)
+        # 81e93d0：光影过重，默认关闭（设置中心可开）
+        self.assertIs(a["enabled"], False)
         self.assertEqual(a["color_mode"], "auto")
         self.assertGreaterEqual(a["light_count"], 2)
         self.assertLessEqual(a["light_count"], 5)

@@ -187,18 +187,19 @@ class DockTests(unittest.TestCase):
 
     def test_dock_aurora_off_keeps_glass(self):
         bn = self.win.bottom_nav
-        S.set("aurora.enabled", False)
+        S.set("nav.aurora", False)
         settle(self.app, 8)
         self.assertTrue(bn.isVisible())
-        self.assertFalse(bn._aurora._timer.isActive())
-        S.set("aurora.enabled", True)
+        self.assertFalse(bn._anim_timer.isActive())
+        S.set("nav.aurora", True)
 
     def test_dock_ten_entries(self):
         self.assertEqual(self.win.bottom_nav._n, 10)
         keys = [k for k, _ in self.win.bottom_nav._entries]
         self.assertEqual(keys[0], "overview")
         self.assertIn("duplicates", keys)
-        self.assertEqual(keys[-1], "settings")
+        # 顺序 = content_stack：设置(8) / 重复照片(9)
+        self.assertEqual(keys[8:], ["settings", "duplicates"])
 
 
 if __name__ == "__main__":
