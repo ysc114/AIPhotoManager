@@ -37,6 +37,7 @@ from PySide6.QtWidgets import (
 )
 
 from config.settings_manager import settings as S
+from core.duplicates import _md5
 from ui.components.glass_card import GlassCard
 from ui.components.glass_button import GlassButton
 from ui.components.animated_toggle import AnimatedToggle
@@ -901,8 +902,7 @@ class SettingsCenterPage(QWidget):
                 if f in db_paths:
                     continue
                 try:
-                    import hashlib
-                    m = hashlib.md5(open(os.path.join(photos, f), "rb").read()).hexdigest()[:12]
+                    m = _md5(os.path.join(photos, f))[:12]
                     seen.setdefault(m, []).append(f)
                 except OSError:
                     pass

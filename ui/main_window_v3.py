@@ -109,6 +109,7 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         "⭐  收藏",
         "⚠️  待处理",
         "⚙️  设置",
+        "♻️  重复照片",
     ]
 
     def __init__(self):

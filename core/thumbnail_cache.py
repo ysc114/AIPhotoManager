@@ -19,6 +19,7 @@ ThumbnailCache —— 独立图片缩略图缓存系统（第三方开源组件�
 纯缓存层：不解析业务数据，不读写 identity_db，不触碰聚类 / MD5 去重逻辑。
 """
 
+import atexit
 import hashlib
 import json
 import os
@@ -400,3 +401,8 @@ class ThumbnailCache(QObject):
 
 # 模块级单例：各页面共享同一实例
 thumbnail_cache = ThumbnailCache()
+
+# 解释器退出兜底：后台 QThread 未停止时直接退出会触发原生崩溃
+# （Windows 0xC0000409，测试/脚本等未走 Qt aboutToQuit 的场景）。
+# main.py 已接 aboutToQuit；shutdown() 幂等，重复调用安全。
+atexit.register(thumbnail_cache.shutdown)

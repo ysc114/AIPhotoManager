@@ -269,6 +269,7 @@ class DuplicatesPage(QWidget):
         # ── ⑰ 完全相同（MD5）──
         n_groups = len(self._groups)
         n_files = sum(len(g["paths"]) for g in self._groups)
+        self._stats.setText(f"{n_groups} 组重复 · {n_files} 个文件")
         md5_head = QLabel(f"⑰ 完全相同（MD5） · {n_groups} 组 / {n_files} 个文件")
         md5_head.setStyleSheet(
             "font-size:13.5px;font-weight:800;color:#2a3a52;background:transparent;border:none;")

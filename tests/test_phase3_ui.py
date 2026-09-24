@@ -61,10 +61,17 @@ class Phase3UiTests(unittest.TestCase):
             self.window.content_stack.currentWidget(),
             self.window.settings_page,
         )
-        # 导航项数量与顺序
+        # 页 9：重复照片（经典模式左侧导航同样可达）
+        self.window._switch_page(9)
+        self.assertIs(
+            self.window.content_stack.currentWidget(),
+            self.window.duplicates_page,
+        )
+        # 导航项数量与顺序（10 项 = 内容栈页数）
         items = [self.window.nav_list.item(i).text() for i in range(self.window.nav_list.count())]
-        self.assertEqual(len(items), 9)
+        self.assertEqual(len(items), 10)
         self.assertIn("AI精选", items[1])
+        self.assertIn("重复照片", items[9])
 
     def test_photo_page_favorite_button(self):
         btns = [b.text() for b in self.window.photo_page.findChildren(QPushButton)]
