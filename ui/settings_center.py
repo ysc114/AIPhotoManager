@@ -681,6 +681,35 @@ class SettingsCenterPage(QWidget):
         btn_row.addStretch(1)
         body.addLayout(btn_row)
 
+        # 视觉/语义搜索索引状态（只读 metadata.json，不加载模型）
+        self._index_status_label = QLabel("")
+        self._index_status_label.setStyleSheet(
+            "font-size:12px;color:#4a5a6a;background:rgba(255,255,255,0.45);"
+            "border:1px solid rgba(255,255,255,0.6);border-radius:10px;"
+            "padding:8px 12px;"
+        )
+        self._index_status_label.setWordWrap(True)
+        body.addWidget(self._index_status_label)
+
+        idx_row = QHBoxLayout()
+        idx_row.setSpacing(10)
+        self._index_btn = self._glass_btn(
+            "🧠 更新视觉索引", ("#6fb7f5", "#9b8cf0"), self._update_visual_index)
+        self._index_btn.setProperty("rebuild", False)
+        idx_row.addWidget(self._index_btn)
+        idx_row.addStretch(1)
+        body.addLayout(idx_row)
+
+        self._index_hint = QLabel("")
+        self._index_hint.setStyleSheet(
+            "font-size:11px;color:#a0aab8;background:transparent;border:none;")
+        self._index_hint.setWordWrap(True)
+        body.addWidget(self._index_hint)
+
+        self._row(body, "入库后自动更新索引", self._check(
+            "data.auto_update_visual_index", on_change=self.refresh_index_status),
+            note="分析/扫描新照片完成后，后台增量补齐搜索索引")
+
         tip = QLabel("不提供「重新聚类全部照片」。全量重聚会拆散人工合并结果，请使用「AI 找候选 → 人工确认 → 合并」流程。")
         tip.setStyleSheet("font-size:11px;color:#a0aab8;background:transparent;border:none;")
         tip.setWordWrap(True)
@@ -837,10 +866,92 @@ class SettingsCenterPage(QWidget):
     # ========================================================
     # 行为
     # ========================================================
+    def refresh_index_status(self):
+        """刷新视觉索引状态行（只读 metadata.json，不加载模型/faiss）。"""
+        label = getattr(self, "_index_status_label", None)
+        if label is None:
+            return
+        try:
+            from core.visual_search import read_index_status
+            st = read_index_status()
+        except Exception as e:
+            label.setText(f"视觉索引：状态读取失败（{e}）")
+            return
+        state = st["state"]
+        if state == "ready":
+            updated = "—"
+            if st["updated_at"]:
+                updated = datetime.datetime.fromtimestamp(
+                    st["updated_at"]).strftime("%Y-%m-%d %H:%M")
+            pending = st["indexed"] < st["photos_total"]
+            tail = "待更新" if pending else "已最新"
+            label.setText(
+                f"视觉索引：已索引 {st['indexed']}/{st['photos_total']} 张"
+                f" ｜ 模型 {st['model_name']}"
+                f" ｜ 最近更新 {updated}（{tail}）"
+            )
+            self._set_index_btn_rebuild(False)
+        elif state == "mismatch":
+            label.setText(
+                f"视觉索引：模型不一致（索引 {st['model_name']} ≠ 当前模型），"
+                f"需要重建索引"
+            )
+            self._set_index_btn_rebuild(True)
+        elif state == "corrupt":
+            label.setText("视觉索引：文件损坏或不可读，需要重建索引")
+            self._set_index_btn_rebuild(True)
+        elif state == "incomplete":
+            label.setText("视觉索引：文件不完整（缺少 index/metadata），需要重建索引")
+            self._set_index_btn_rebuild(True)
+        else:
+            label.setText(f"视觉索引：尚未建立（photos/ 共 {st['photos_total']} 张）")
+            self._set_index_btn_rebuild(False)
+
+    def _set_index_btn_rebuild(self, rebuild):
+        """按钮在「更新」与「重建」之间切换（重建=删缓存后全量重算）。"""
+        btn = getattr(self, "_index_btn", None)
+        if btn is None:
+            return
+        rebuild = bool(rebuild)
+        btn.setProperty("rebuild", rebuild)
+        btn.setText("♻️ 重建视觉索引" if rebuild else "🧠 更新视觉索引")
+
+    def _index_needs_rebuild(self):
+        btn = getattr(self, "_index_btn", None)
+        return bool(btn is not None and btn.property("rebuild"))
+
+    def _update_visual_index(self):
+        """手动更新/重建视觉索引（后台线程；重建需二次确认）。"""
+        win = self.win
+        if win is None or not hasattr(win, "_update_visual_index_async"):
+            self._index_hint.setText("主窗口未就绪，无法更新索引。")
+            return
+        if self._index_needs_rebuild():
+            ret = QMessageBox.question(
+                self, "重建视觉索引",
+                "将删除并重建搜索索引缓存（cache/visual_search/）。\n"
+                "仅影响搜索缓存，不会影响照片、角色分组与收藏数据。继续？",
+            )
+            if ret != QMessageBox.Yes:
+                return
+            try:
+                from core.visual_search import clear_index_files, reset_index
+                removed = clear_index_files()
+                reset_index()
+                self._index_hint.setText(f"已清理 {removed} 个索引文件，开始重建…")
+            except Exception as e:
+                self._index_hint.setText(f"重建失败：{e}")
+                return
+        if win._update_visual_index_async():
+            self._index_hint.setText("视觉索引更新已开始（后台运行，可继续使用）。")
+        else:
+            self._index_hint.setText("视觉索引更新已在进行中。")
+
     def refresh(self):
         """切到设置页时刷新动态数据（惰性，避免构造副作用）。"""
         self.refresh_data_stats()
         self._refresh_db_status()
+        self.refresh_index_status()
 
     def refresh_data_stats(self):
         """读取数据库统计（只读，带 30s 结果缓存）。"""

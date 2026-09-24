@@ -12,6 +12,7 @@
 import os
 import shutil
 import sys
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -26,6 +27,8 @@ from core.visual_search import (
     ClipImageEncoder,
     VisualSearchIndex,
     VisualSearchModelMismatch,
+    clear_index_files,
+    read_index_status,
     resolve_device,
 )
 from tests.test_visual_duplicates import make_scene
@@ -253,6 +256,162 @@ class VisualSearchInfraTests(unittest.TestCase):
                         for n in names),
                     f"{f.name} 不得 import 角色系统/Fursee/model_hub")
 
+
+class _FakeEncoder:
+    """确定性假编码器：不加载模型即可覆盖索引持久化/续建/清理逻辑。"""
+
+    def __init__(self, dim=8):
+        self._dim = dim
+
+    def _vec(self, key):
+        rng = np.random.default_rng(abs(hash(key)) % (2 ** 32))
+        v = rng.normal(size=self._dim).astype(np.float32)
+        return v / np.linalg.norm(v)
+
+    def model_info(self):
+        return {"model_name": "ViT-L-14",
+                "pretrained": "datacomp_xl_s13b_b90k",
+                "embedding_dimension": self._dim,
+                "model_version": "fake"}
+
+    def encode(self, path, normalize=True):
+        return self._vec(str(path))
+
+    def encode_batch(self, paths, normalize=True, progress_cb=None):
+        out = []
+        for i, p in enumerate(paths):
+            out.append(self._vec(str(p)))
+            if progress_cb:
+                progress_cb(i + 1, len(paths))
+        return out
+
+
+class VisualIndexPersistenceTests(unittest.TestCase):
+    """faiss 中文路径 / 中断续建 / 垃圾清理 / 状态读取（假编码器，不加载模型）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.TemporaryDirectory()
+        cls.dir = Path(cls.tmp.name)
+        cls.encoder = _FakeEncoder()
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.tmp.cleanup()
+
+    def _photos(self, name, count):
+        d = self.dir / name
+        d.mkdir(parents=True, exist_ok=True)
+        files = []
+        for i in range(count):
+            p = d / f"img_{i}.jpg"
+            if not p.exists():
+                p.write_bytes(f"fake-image-{i}".encode())
+            files.append(str(p))
+        return d, files
+
+    def test_cjk_cache_dir_roundtrip(self):
+        """回归：项目路径含中文（.../同步/...）时索引也能存能读能搜。"""
+        _, files = self._photos("cjk_photos", 6)
+        cache = self.dir / "同步缓存_测试"
+        idx = VisualSearchIndex(cache_dir=str(cache))
+        stats = idx.add_images(files[:4], self.encoder)
+        self.assertEqual(stats["new"], 4)
+        self.assertTrue((cache / "index.faiss").is_file())
+        self.assertTrue((cache / "metadata.json").is_file())
+        idx2 = VisualSearchIndex(cache_dir=str(cache))
+        self.assertEqual(idx2.count(), 4)
+        hits = idx2.search_by_image(files[0], self.encoder, top_k=3)
+        self.assertEqual(len(hits), 3)
+        # 状态读取（设置页状态行）不加载模型
+        st = read_index_status(cache_dir=str(cache),
+                               photos_dir=str(self.dir / "cjk_photos"))
+        self.assertEqual(st["state"], "ready")
+        self.assertEqual(st["indexed"], 4)
+        self.assertEqual(st["photos_total"], 6)
+
+    def test_resume_after_interrupt(self):
+        """分批落盘 + 续建：第二次调用跳过已落盘照片，entries 无重复。"""
+        _, files = self._photos("resume_photos", 30)
+        cache = self.dir / "resume_cache"
+        idx = VisualSearchIndex(cache_dir=str(cache))
+        first = idx.add_images(files[:10], self.encoder)
+        self.assertEqual(first["new"], 10)
+        stats = idx.add_images(files, self.encoder)
+        self.assertEqual(stats["skipped_existing"], 10)
+        self.assertEqual(stats["new"], 20)
+        self.assertEqual(idx.count(), 30)
+        with open(idx.metadata_path, "r", encoding="utf-8") as fh:
+            meta = json.load(fh)
+        self.assertEqual(len(meta["entries"]), 30)
+        paths = [e["path"] for e in meta["entries"]]
+        self.assertEqual(len(paths), len(set(paths)))
+        ids = [e["id"] for e in meta["entries"]]
+        self.assertEqual(ids, list(range(30)))
+
+    def test_progress_is_cumulative(self):
+        """分批编码后进度回调仍是全局累计（1..N），不会每块归零。"""
+        _, files = self._photos("progress_photos", 30)
+        idx = VisualSearchIndex(cache_dir=str(self.dir / "progress_cache"))
+        seen = []
+        idx.add_images(files, self.encoder,
+                       progress_cb=lambda d, t: seen.append((d, t)))
+        self.assertEqual(seen[0], (1, 30))
+        self.assertEqual(seen[-1], (30, 30))
+        self.assertTrue(all(seen[i][0] <= seen[i + 1][0]
+                            for i in range(len(seen) - 1)))
+        self.assertTrue(all(t == 30 for _, t in seen))
+
+    def test_stale_temp_files_cleaned(self):
+        """历史上中断留下的 .index_tmp_*/.meta_tmp_* 在加载时清理。"""
+        _, files = self._photos("cleanup_photos", 3)
+        cache = self.dir / "cleanup_cache"
+        idx = VisualSearchIndex(cache_dir=str(cache))
+        idx.add_images(files, self.encoder)
+        (cache / ".index_tmp_stale").write_bytes(b"")
+        (cache / ".meta_tmp_stale.json").write_text("{}", encoding="utf-8")
+        VisualSearchIndex(cache_dir=str(cache))
+        leftovers = [p.name for p in cache.iterdir() if "_tmp_" in p.name]
+        self.assertEqual(leftovers, [])
+        self.assertEqual(
+            read_index_status(cache_dir=str(cache))["state"], "ready")
+
+    def test_legacy_index_upgraded(self):
+        """旧格式（faiss.write_index）索引可读，并自动改写为新格式。"""
+        import faiss
+        _, files = self._photos("legacy_photos", 2)
+        cache = self.dir / "legacy_cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        plain = faiss.IndexFlatIP(8)
+        plain.add(np.random.rand(2, 8).astype(np.float32))
+        ascii_tmp = self.dir / "legacy_plain.faiss"
+        faiss.write_index(plain, str(ascii_tmp))
+        (cache / "index.faiss").write_bytes(ascii_tmp.read_bytes())
+        with open(cache / "metadata.json", "w", encoding="utf-8") as fh:
+            json.dump({
+                "version": 1, "model": self.encoder.model_info(),
+                "entries": [
+                    {"id": 0, "path": files[0], "md5": "a", "size": 1,
+                     "mtime_ns": 1},
+                    {"id": 1, "path": files[1], "md5": "b", "size": 1,
+                     "mtime_ns": 1},
+                ]}, fh)
+        idx = VisualSearchIndex(cache_dir=str(cache))
+        self.assertEqual(idx.count(), 2)
+        blob = (cache / "index.faiss").read_bytes()
+        restored = faiss.deserialize_index(np.frombuffer(blob, dtype=np.uint8))
+        self.assertEqual(restored.ntotal, 2)
+
+    def test_clear_index_files(self):
+        """重建入口：清空缓存文件后状态回到 missing。"""
+        _, files = self._photos("clear_photos", 3)
+        cache = self.dir / "clear_cache"
+        idx = VisualSearchIndex(cache_dir=str(cache))
+        idx.add_images(files, self.encoder)
+        removed = clear_index_files(cache_dir=str(cache))
+        self.assertEqual(removed, 2)
+        self.assertEqual(
+            read_index_status(cache_dir=str(cache))["state"], "missing")
 
 if __name__ == "__main__":
     unittest.main()

@@ -17,6 +17,7 @@ from core.visual_search.embedding import (
 )
 from core.visual_search.index import (
     VisualSearchIndex, VisualSearchModelMismatch, get_index, reset_index,
+    read_index_status, clear_index_files, default_cache_dir,
 )
 from core.visual_search.search import (
     add_image, add_images, build_photo_index, search_by_image, search_by_text,
@@ -26,6 +27,7 @@ from core.visual_search.search import (
 __all__ = [
     "ClipImageEncoder", "get_encoder", "reset_encoder", "resolve_device",
     "VisualSearchIndex", "VisualSearchModelMismatch", "get_index", "reset_index",
+    "read_index_status", "clear_index_files", "default_cache_dir",
     "add_image", "add_images", "build_photo_index", "search_by_image",
     "search_by_text", "reset",
 ]

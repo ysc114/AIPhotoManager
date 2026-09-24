@@ -826,6 +826,9 @@ class _RoleCenterMixinMixin:
             f"失败 {result.get('failed', 0)} 张\n\n"
             f"新角色已按增量分配（0.79）归组，列表已刷新。",
         )
+        # 入库完成 → 后台增量更新视觉索引（设置中心可关）
+        if S.get("data.auto_update_visual_index", True):
+            self._update_visual_index_async()
 
 
     def _on_scan_failed(self, err):

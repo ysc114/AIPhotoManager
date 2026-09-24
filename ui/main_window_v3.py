@@ -1256,6 +1256,9 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
             self._refresh_overview()
         # 摘要
         self._show_analyze_summary(result)
+        # 入库完成 → 后台增量更新视觉/语义搜索索引（设置中心可关）
+        if S.get("data.auto_update_visual_index", True):
+            self._update_visual_index_async()
 
     def _on_analyze_failed(self, err):
         self._pending_analyze_btn.setEnabled(True)
@@ -1529,31 +1532,110 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
 
         self._global_search.set_results(sections)
 
+    def _index_worker_running(self):
+        """是否有视觉索引构建任务在跑（自动维护 / 语义搜索共用）。"""
+        for w in (getattr(self, "_visual_index_worker", None),
+                  getattr(self, "_sem_worker", None)):
+            if w is not None and w.isRunning():
+                return True
+        return False
+
+    @staticmethod
+    def _reap_index_worker(worker):
+        """等后台线程真正退出后再丢引用（避免 QThread 析构时仍在运行）。"""
+        try:
+            if worker is not None and worker.isRunning():
+                worker.wait(3000)
+        except Exception:
+            pass
+
+    def _update_visual_index_async(self):
+        """入库完成后台增量更新视觉索引。
+
+        失败只提示不弹窗、不打断主流程；已有任务在跑则跳过（返回 False）。
+        """
+        if self._index_worker_running():
+            return False
+        w = _SemanticBuildWorker()
+        w.progress_updated.connect(self._on_visual_index_progress)
+        w.finished_build.connect(self._on_visual_index_done)
+        w.failed.connect(self._on_visual_index_failed)
+        self._visual_index_worker = w
+        w.start()
+        return True
+
+    def _on_visual_index_progress(self, cur, total):
+        if total:
+            self.statusBar().showMessage(f"视觉索引更新 {cur}/{total}…", 1500)
+
+    def _on_visual_index_done(self, stats):
+        self._reap_index_worker(getattr(self, "_visual_index_worker", None))
+        self._visual_index_worker = None
+        self._notify_index_updated(stats or {})
+        # 搜索面板开着 → 用当前查询重渲染（语义结果自动刷新）
+        if self._global_search is not None and self._global_search.isVisible():
+            self._on_global_search_query(self._global_search.query())
+
+    def _on_visual_index_failed(self, err):
+        self._reap_index_worker(getattr(self, "_visual_index_worker", None))
+        self._visual_index_worker = None
+        print(f"[视觉索引] 更新失败: {err}")
+        self.statusBar().showMessage(f"视觉索引更新失败：{err}", 10000)
+        self._refresh_settings_index_status()
+
+    def _notify_index_updated(self, stats):
+        """索引更新完成的统一反馈（状态栏 + 设置页状态行，不弹模态框）。"""
+        new = int(stats.get("new") or 0)
+        skipped = int(stats.get("skipped_existing") or 0)
+        msg = f"视觉索引已更新：新增 {new} 张"
+        if skipped:
+            msg += f"，跳过已索引 {skipped} 张"
+        try:
+            from core.visual_search import read_index_status
+            st = read_index_status()
+            msg += "（已索引 %d/%d）" % (st["indexed"], st["photos_total"])
+        except Exception:
+            pass
+        self.statusBar().showMessage(msg, 8000)
+        self._refresh_settings_index_status()
+
+    def _refresh_settings_index_status(self):
+        page = getattr(self, "settings_center", None)
+        if page is not None and hasattr(page, "refresh_index_status"):
+            try:
+                page.refresh_index_status()
+            except Exception as e:
+                print(f"[视觉索引] 设置页状态刷新失败: {e}")
+
     def _start_semantic_build(self):
         """后台构建/增量更新视觉索引（首次全量，之后增量秒级）。"""
         if getattr(self, "_sem_building", False):
             return
-        if getattr(self, "_sem_worker", None) is not None \
-                and self._sem_worker.isRunning():
-            return
+        if self._index_worker_running():
+            return  # 自动维护已在跑：完成后会统一刷新搜索结果
         self._sem_building = True
         w = _SemanticBuildWorker()
+        w.progress_updated.connect(self._on_visual_index_progress)
         w.finished_build.connect(self._on_semantic_build_done)
         w.failed.connect(self._on_semantic_build_failed)
         self._sem_worker = w
         w.start()
 
-    def _on_semantic_build_done(self):
+    def _on_semantic_build_done(self, stats=None):
+        self._reap_index_worker(getattr(self, "_sem_worker", None))
         self._sem_building = False
         self._sem_worker = None
+        self._notify_index_updated(stats or {})
         # 索引就绪：用当前查询重新渲染（自动出现语义结果）
         if self._global_search is not None and self._global_search.isVisible():
             self._on_global_search_query(self._global_search.query())
 
     def _on_semantic_build_failed(self, err):
+        self._reap_index_worker(getattr(self, "_sem_worker", None))
         self._sem_building = False
         self._sem_worker = None
         print(f"[语义搜索] 索引构建失败: {err}")
+        self._refresh_settings_index_status()
 
     def _on_global_result_selected(self, item):
         """结果打开：角色 → 角色详情；照片/收藏/文件 → 照片页预览。"""
@@ -1577,6 +1659,10 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         worker = getattr(self, "_similar_worker", None)
         if worker is not None and worker.isRunning():
             self.statusBar().showMessage("相似照片搜索已在进行中…", 3000)
+            return
+        if self._index_worker_running():
+            self.statusBar().showMessage(
+                "视觉索引正在更新，请稍候几秒再试…", 5000)
             return
         path = self.current_image_path
         if not path and self.image_list:
@@ -2570,7 +2656,8 @@ class _SimilarSearchWorker(QThread):
 class _SemanticBuildWorker(QThread):
     """后台构建/增量更新视觉索引（语义搜索前置；不触碰 identity_db）。"""
 
-    finished_build = Signal()
+    progress_updated = Signal(int, int)   # (done, total)
+    finished_build = Signal(dict)         # 增量统计 {new, skipped_existing, ...}
     failed = Signal(str)
 
     _EXTS = {".jpg", ".jpeg", ".png", ".webp"}
@@ -2588,7 +2675,9 @@ class _SemanticBuildWorker(QThread):
                     if os.path.splitext(n)[1].lower() in self._EXTS
                 )
             index = get_index()
-            index.add_images(files, get_encoder())
-            self.finished_build.emit()
+            stats = index.add_images(
+                files, get_encoder(),
+                progress_cb=lambda d, t: self.progress_updated.emit(d, t))
+            self.finished_build.emit(dict(stats or {}))
         except Exception as e:
             self.failed.emit(str(e))

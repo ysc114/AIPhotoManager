@@ -35,8 +35,9 @@ AI 照片管理系统：本地 + NAS 照片管理，AI 自动分类、兽装/人
 - **疑似重复照片**（路线图 ②）：视觉相似检测（dHash + 直方图 + 灰度相关性，区别于 MD5 的"内容完全一致"）——连拍/构图相似/轻微糊/曝光不同；AI 只推荐，人工「保留此张/忽略该组」，绝不自动删除（待清理仅标记，落盘 JSON 缓存复用）
 - **相似照片搜索**（路线图 ③）：选一张照片 → 复用视觉指纹返回库内最相似的 N 张（同场景/同角色/连拍），纯只读
 - **全局搜索面板**（路线图 ④ 第一阶段）：Spotlight 风格悬浮搜索（Ctrl+K / Ctrl+Shift+F），分区结果（最近搜索/角色/照片/收藏，标签/文件预留）；组件化 `ui/components/global_search.py`，只发信号，数据与跳转由 MainWindow 决定
-- **以图搜图**（智能搜索第 2 层 · 第一阶段）：独立 OpenCLIP 视觉 Embedding + FAISS 索引（`core/visual_search/`，`cache/visual_search/`）；GPU/CPU 自适应、L2 归一化、增量建索引（已索引复用 / MD5 去重）、模型版本校验（换模型不混用）；照片页「🔎 查找相似照片」
+- **以图搜图**（智能搜索第 2 层 · 第一阶段）：独立 OpenCLIP 视觉 Embedding + FAISS 索引（`core/visual_search/`，`cache/visual_search/`）；GPU/CPU 自适应、L2 归一化、增量建索引（已索引复用 / MD5 去重）、模型版本校验（换模型不混用）；索引读写走内存序列化（**中文路径安全**：faiss 自带路径式 I/O 在含中文目录下会失败）、**分批落盘（中断可续建）**；照片页「🔎 查找相似照片」
 - **自然语言搜索**（第 2 层 · 第二阶段）：同一 CLIP 空间文本 embedding（`encode_text`）→ `search_by_text`；Spotlight 全局搜索面板新增 **🧠 语义（CLIP）** 分区（索引为空时后台自动构建并在完成后自动刷新结果）
+- **索引自动维护**：分析/扫描新照片入库完成后，后台增量补齐视觉搜索索引（设置中心可关：`data.auto_update_visual_index`，失败只提示不弹窗）；设置中心「AI 数据」显示索引状态（已索引/总数/模型/更新时间）并提供「更新/重建视觉索引」入口（重建需二次确认，仅删搜索缓存）
 - **角色照片墙**：组内按 `(path, det_idx)` 去重，bbox 主体裁剪作为卡片封面
 - **缩略图优化**：`QImageReader.setClipRect` 先裁后缩 + EXIF 旋转映射，小主体不再模糊
 
@@ -274,7 +275,8 @@ QT_QPA_PLATFORM=offscreen C:/Program Files/Python310/python.exe -m unittest disc
 | `test_visual_duplicates.py` | 疑似重复照片：dHash/直方图/灰度指纹、分组、MD5 副本隔离、忽略/保留决策持久化、相似搜索（temp）|
 | `test_visual_duplicates_ui.py` | 重复照片页视觉区块 + 相似搜索区块 GUI 冒烟（temp，只标记不删除）|
 | `test_global_search.py` | Spotlight 全局搜索面板：防抖/分区渲染/键盘导航/Esc/最近搜索 + 主窗口快捷键、分发与语义分区冒烟（offscreen）|
-| `test_visual_search.py` | 以图搜图/自然语言搜索：OpenCLIP 加载/设备/维度/归一化/文本 embedding、FAISS 建索/加图/检索排序、增量与 MD5 去重、模型一致性、身份系统零依赖 |
+| `test_visual_search.py` | 以图搜图/自然语言搜索：OpenCLIP 加载/设备/维度/归一化/文本 embedding、FAISS 建索/加图/检索排序、增量与 MD5 去重、模型一致性、身份系统零依赖、**中文路径持久化 / 中断续建 / 临时文件清理 / 旧格式升级** |
+| `test_visual_index_ui.py` | 视觉索引维护 UI：入库后自动增量只触发一次、可关闭、失败不弹模态框、索引更新中不并发搜索、设置页状态行与「更新/重建」按钮切换（offscreen，桩 worker）|
 | `test_legacy_visibility.py` | get_groups 过滤（连接生产库，慎跑）|
 | `test_ai_classifier_cache.py` | 缓存命中（None/{}→重分析，有效→命中）|
 
