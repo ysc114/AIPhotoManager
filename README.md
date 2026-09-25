@@ -294,14 +294,14 @@ QT_QPA_PLATFORM=offscreen C:/Program Files/Python310/python.exe -m unittest disc
 | 检索与索引 | `test_visual_search.py`、`test_visual_index_ui.py`、`test_global_search.py`、`test_global_search_filters.py`、`test_search_dock.py`、`test_search_filters.py` | CLIP/FAISS（含模型，约 52s：中文路径持久化 / 中断续建 / 临时文件清理 / 旧格式升级）、索引自动增量与重建、Spotlight 与筛选、顶部搜索条与 Dock |
 | 角色与照片 UI | `test_character_page.py`、`test_character_center.py`、`test_detection_aware_ui.py`、`test_photo_wall_dedup.py`、`test_photo_list_restore.py`、`test_naming_walkthrough.py` | 角色页与详情墙（完整原图 + 合照角标 + 跳转）、筛选排序、去重、列表快照与「返回全部」、整理命名 |
 | 界面与视觉 | `test_components.py`、`test_liquid_glass.py`、`test_aurora_config.py`、`test_bottom_nav.py`、`test_phase3_ui.py`、`test_favorites.py` | 组件库、Liquid Glass、极光配置、10 项底部 Dock、收藏与设置页 |
-| 性能与运维 | `test_performance.py`、`test_thumbnail_cache.py`、`test_thumb_primitive.py`、`test_health_check.py`、`test_cache_prune.py`、`test_overview_stats.py`、`test_qt_threads.py`、`test_settings_manager.py` | 6 条性能护栏、缩略图缓存与取图原语、12 项数据体检、失效缓存清理、总览统计口径、QThread 回收（含关窗等待主窗口与子页面线程）、设置持久化 |
+| 性能与运维 | `test_performance.py`、`test_thumbnail_cache.py`、`test_thumb_primitive.py`、`test_health_check.py`、`test_cache_prune.py`、`test_cache_durability.py`、`test_overview_stats.py`、`test_qt_threads.py`、`test_settings_manager.py` | 6 条性能护栏、缩略图缓存与取图原语、12 项数据体检、失效缓存清理、**缓存/反馈原子写与损坏文件留存**、总览统计口径、QThread 回收（含关窗等待主窗口与子页面线程）、设置持久化 |
 | 其它 | `test_analyze_paths.py`、`test_scan_new_photos.py`、`test_ai_classifier_cache.py`、`test_photo_quality.py`、`test_legacy_visibility.py` | 分析路径与扫描、缓存命中语义、画质评分、旧数据可见性（连生产库，慎跑）|
 
 > ⚠️ `test_legacy_visibility.py` 使用无参 `IdentityManager()`（连生产库），CI/他人环境运行前请确认或跳过。
 
 ### 测试规模（2026-09-25）
 
-`tests/` 共 **39 个测试文件 / 367 项**，全绿（运行结束进程退出码 0）；其中 2 个文件需要加载模型
+`tests/` 共 **40 个测试文件 / 374 项**，全绿（运行结束进程退出码 0）；其中 2 个文件需要加载模型
 （`test_visual_search` 约 52s、`test_character_center` 约 48s），其余文件合计约 2 分钟。
 
 ### 性能基线（2026-09-25 实测，offscreen，194 张照片）
@@ -330,6 +330,8 @@ QT_QPA_PLATFORM=offscreen C:/Program Files/Python310/python.exe -m unittest disc
 - `sklearn` 仅在「显式全量重建聚类」路径导入（默认禁用路径），不再拖慢启动后首刷
 - 只读查询统一走 `get_reader()` 共享连接；写操作仍新建实例（见开发铁律）
 - 页面清空（`_clear_grid`）只对本次删除的对象派发 DeferredDelete：传 `None` 会连带处理其他页面遗留的待删对象，offscreen 下曾导致主线程死锁
+- `analysis_cache.json`（含人工分类）与 `feedback.json`（人工反馈）走临时文件 + `os.replace` 原子替换；
+  读到损坏文件先留存为 `.corrupt-<时间戳>.bak`（同步盘/断电场景不丢人工成果）
 
 ---
 
