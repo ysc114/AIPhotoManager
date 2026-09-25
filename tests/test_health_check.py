@@ -58,6 +58,7 @@ class HealthCheckTests(unittest.TestCase):
         kw.setdefault("visual_index_path", self.index_path)
         kw.setdefault("visual_search_cache_dir",
                       os.path.join(self.tmp, "vs_cache"))
+        kw.setdefault("project_root", self.tmp)   # 同步残留项也隔离到临时目录
         return run_health_check(**kw)
 
     def test_all_healthy(self):
@@ -311,6 +312,50 @@ class StartupHealthCheckTests(unittest.TestCase):
             self.win._startup_health_check()
             self.win._startup_health_check()      # 已在跑 → 不重复启动
         self.assertEqual(len(started), 1)
+
+
+class SyncPollutionTests(unittest.TestCase):
+    """云同步残留：统计 .cfg 占位文件（.git 内的单独计数，.venv 不统计）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="sync_")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _cfg(self, rel):
+        p = Path(self.tmp) / rel
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(b"")
+        return p
+
+    def _run(self):
+        # 复用同一套临时路径，避免读到生产文件
+        photos = os.path.join(self.tmp, "photos")
+        os.makedirs(photos, exist_ok=True)
+        return run_health_check(
+            photos_dir=photos,
+            db_path=os.path.join(self.tmp, "id.sqlite"),
+            analysis_cache_file=os.path.join(self.tmp, "analysis_cache.json"),
+            visual_index_path=os.path.join(self.tmp, "visual_similarity.json"),
+            visual_search_cache_dir=os.path.join(self.tmp, "vs_cache"),
+            include_duplicates=False,
+            project_root=self.tmp)
+
+    def test_clean_project_reports_ok(self):
+        item = _item(self._run(), "sync_pollution")
+        self.assertEqual(item["status"], STATUS_OK)
+        self.assertEqual(item["count"], 0)
+
+    def test_counts_git_and_other_but_skips_venv(self):
+        self._cfg(r".git\refs\main.baiduyun.uploading.cfg")
+        self._cfg(r"cache\thumbnails\a.webp.baiduyun.uploading.cfg")
+        self._cfg(r".venv\Lib\site-packages\x.py.baiduyun.uploading.cfg")
+        item = _item(self._run(), "sync_pollution")
+        self.assertEqual(item["status"], STATUS_WARN)
+        self.assertEqual(item["count"], 2, ".venv 内的不计入")
+        self.assertIn(".git 内 1 个", item["detail"])
+        self.assertIn("排除出", item["fix"])
 
 
 if __name__ == "__main__":

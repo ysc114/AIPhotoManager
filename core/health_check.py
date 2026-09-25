@@ -34,9 +34,9 @@ def _project_root():
 
 def run_health_check(photos_dir=None, db_path=None, analysis_cache_file=None,
                      visual_index_path=None, visual_search_cache_dir=None,
-                     include_duplicates=True):
+                     include_duplicates=True, project_root=None):
     """跑一遍体检，返回 {items, errors, warnings, ok_count}（纯只读）。"""
-    root = _project_root()
+    root = project_root or _project_root()
     photos_dir = photos_dir or os.path.join(root, "photos")
     db_path = db_path or os.path.join(root, "identity_db.sqlite")
     items = []
@@ -163,6 +163,36 @@ def run_health_check(photos_dir=None, db_path=None, analysis_cache_file=None,
     except Exception as e:
         items.append(_item("visual_search_index", "语义搜索索引", STATUS_WARN,
                            detail=f"读取失败：{str(e)[:60]}"))
+
+    # ---- 云同步残留（百度网盘会在被同步目录里写 .cfg 占位文件）----
+    try:
+        git_hits = other_hits = 0
+        for dirpath, dirnames, filenames in os.walk(root):
+            if ".venv" in dirnames:
+                dirnames.remove(".venv")      # 依赖目录不统计，避免拖慢体检
+            in_git = (os.sep + ".git") in (dirpath + os.sep)
+            for name in filenames:
+                if "baiduyun" in name and ("uploading.cfg" in name
+                                           or "downloading" in name):
+                    if in_git:
+                        git_hits += 1
+                    else:
+                        other_hits += 1
+        total_sync = git_hits + other_hits
+        detail = (f"{total_sync} 个同步临时文件（.git 内 {git_hits} 个）"
+                  if total_sync else "没有云同步残留文件")
+        if git_hits:
+            detail += "——.git 被同步可能干扰 git 操作"
+        items.append(_item(
+            "sync_pollution", "云同步残留",
+            STATUS_WARN if total_sync else STATUS_OK, total_sync,
+            detail=detail,
+            fix=("把 .git / .venv / cache 排除出百度网盘同步目录；"
+                 "确认同步完成后再删除这些 .cfg 临时文件")
+            if total_sync else ""))
+    except Exception as e:
+        items.append(_item("sync_pollution", "云同步残留", STATUS_WARN,
+                           detail=f"扫描失败：{str(e)[:60]}"))
 
     # ---- 完全重复的照片（MD5，可选：需要读盘）----
     if include_duplicates:
