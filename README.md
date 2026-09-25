@@ -286,12 +286,18 @@ QT_QPA_PLATFORM=offscreen C:/Program Files/Python310/python.exe -m unittest disc
 
 > ⚠️ `test_legacy_visibility.py` 使用无参 `IdentityManager()`（连生产库），CI/他人环境运行前请确认或跳过。
 
+### 测试规模（2026-09-25）
+
+`tests/` 共 **39 个测试文件 / 338 项**，全绿；其中 2 个文件需要加载模型
+（`test_visual_search` 约 52s、`test_character_center` 约 48s），其余文件合计约 2 分钟。
+
 ### 性能基线（2026-09-25 实测，offscreen，194 张照片）
 
 | 指标 | 实测 |
 |---|---|
-| 主窗口构造 | ~0.45s |
-| 启动到首帧（构造 + show + 8 帧事件循环） | ~0.9s |
+| 主窗口构造 | ~0.31s（端到端冒烟复测） |
+| 启动到首帧（构造 + show + 8 帧事件循环） | ~0.65s |
+| 启动后台体检完成（含状态栏提示） | ~0.92s |
 | 总览统计刷新（首次 / 热） | 0.04s / 0.01s |
 | 待处理页统计（热；冷启动含首次 import） | 0.02s / ~2s |
 | 全库重复扫描 `DuplicateScanner.scan()` | 0.02s |
