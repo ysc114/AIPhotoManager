@@ -282,6 +282,25 @@ QT_QPA_PLATFORM=offscreen C:/Program Files/Python310/python.exe -m unittest disc
 
 > ⚠️ `test_legacy_visibility.py` 使用无参 `IdentityManager()`（连生产库），CI/他人环境运行前请确认或跳过。
 
+### 性能基线（2026-09-25 实测，offscreen，194 张照片）
+
+| 指标 | 实测 |
+|---|---|
+| 主窗口构造 | ~0.45s |
+| 启动到首帧（构造 + show + 8 帧事件循环） | ~0.9s |
+| 总览统计刷新（首次 / 热） | 0.04s / 0.01s |
+| 待处理页统计（热；冷启动含首次 import） | 0.02s / ~2s |
+| 全库重复扫描 `DuplicateScanner.scan()` | 0.02s |
+| 角色页 221 组卡片全量渲染（分批，不阻塞） | ~1.4s |
+| 常驻内存 RSS | ~136MB |
+
+关键惰性点（改动前都是启动期同步开销）：
+
+- 重复照片页：`auto_scan=False`，**首次进入页面才扫描**（MD5 + 指纹变化检查）
+- 设置页：Git commit / Schema 版本**首次进入设置页才读取**（原来构造时 spawn git 子进程）
+- `sklearn` 仅在「显式全量重建聚类」路径导入（默认禁用路径），不再拖慢启动后首刷
+- 只读查询统一走 `get_reader()` 共享连接；写操作仍新建实例（见开发铁律）
+
 ---
 
 ## 十、开发铁律（必读）
