@@ -5,14 +5,15 @@
     "theme": "system",
     "liquid_glass": true,
     "glass_opacity": 0.3,
-    "glass_blur": 47.0,
-    "corner_radius": 28.0,
+    "glass_blur": 20.0,
+    "corner_radius": 19.0,
     "thumb_radius": 4.0,
     "shadow_strength": 49.0,
     "animation": true,
     "animation_speed": 0.5,
     "thumbnail_size": 138,
     "grid_columns": 7,
+    "perf_mode": true,
     "rounded_photos": true,
     "show_photo_info": true
   },
@@ -53,10 +54,11 @@
     "error": true
   },
   "data": {
-    "clean_invalid_cache": true
+    "clean_invalid_cache": true,
+    "auto_update_visual_index": true
   },
   "aurora": {
-    "enabled": false,
+    "enabled": true,
     "intensity": 0.55,
     "speed": 1.0,
     "color_mode": "auto",
@@ -68,11 +70,20 @@
     "hover_lift": 0.5,
     "light_count": 3
   },
+  "glass": {
+    "enabled": true,
+    "thickness": 0.7,
+    "frost": 0.5,
+    "opacity": 0.4,
+    "mouse_follow": false
+  },
   "nav": {
     "show_text": true,
     "animation": true,
-    "animation_strength": 0.94,
-    "liquid_effect": "standard"
+    "animation_strength": 1.0,
+    "liquid_effect": "standard",
+    "aurora": true,
+    "glass": true
   },
   "advanced": {
     "debug_mode": false,
