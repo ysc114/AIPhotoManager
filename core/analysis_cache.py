@@ -22,20 +22,50 @@ class AnalysisCache:
         self._cache = {}
         self._load_from_disk()
 
+    def _quarantine_corrupt(self, err):
+        """把损坏的缓存文件改名留存（不静默丢弃人工分类）。"""
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        target = f"{self.cache_file}.corrupt-{stamp}.bak"
+        try:
+            os.replace(self.cache_file, target)
+            print(f"[缓存] 读取失败（{err}），原文件已留存为 {os.path.basename(target)}")
+            return target
+        except OSError as e:
+            print(f"[缓存] 留存损坏文件失败：{e}")
+            return ""
+
     def _load_from_disk(self):
-        """从磁盘加载缓存"""
-        if os.path.exists(self.cache_file):
-            try:
-                with open(self.cache_file, "r", encoding="utf-8") as f:
-                    self._cache = json.load(f)
-                print(f"[缓存] 从磁盘加载 {len(self._cache)} 条记录")
-            except (json.JSONDecodeError, IOError):
-                self._cache = {}
+        """从磁盘加载缓存；损坏时先另存为 .corrupt-*.bak，不静默覆盖。"""
+        if not os.path.exists(self.cache_file):
+            return
+        try:
+            with open(self.cache_file, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if not isinstance(data, dict):
+                raise ValueError("缓存结构不是对象")
+            self._cache = data
+            print(f"[缓存] 从磁盘加载 {len(self._cache)} 条记录")
+        except (ValueError, OSError) as e:
+            self._cache = {}
+            self._quarantine_corrupt(e)
 
     def _save_to_disk(self):
-        """保存缓存到磁盘"""
-        with open(self.cache_file, "w", encoding="utf-8") as f:
-            json.dump(self._cache, f, ensure_ascii=False, indent=2)
+        """保存缓存（临时文件 + 原子替换）。
+
+        直接覆盖写在中途被杀 / 断电 / 同步盘打断时会留下半截 JSON，
+        下次启动按空缓存加载，紧接着一次保存就把人工分类覆盖没了。
+        """
+        tmp = self.cache_file + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self._cache, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.cache_file)
+        except Exception:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
 
     def get(self, image_path):
         """获取缓存的分析结果"""

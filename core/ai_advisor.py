@@ -52,6 +52,20 @@ class AIAdvisor:
     # 反馈管理
     # ============================================================
 
+    def _quarantine_feedback(self, err) -> str:
+        """反馈文件读不了时先改名留存，避免被新记录直接覆盖。"""
+        import datetime as _dt
+
+        stamp = _dt.datetime.now().strftime("%Y%m%d_%H%M%S")
+        target = f"{self.feedback_file}.corrupt-{stamp}.bak"
+        try:
+            os.replace(self.feedback_file, target)
+            print(f"[反馈] 读取失败（{err}），原文件已留存为 {os.path.basename(target)}")
+            return target
+        except OSError as e:
+            print(f"[反馈] 留存损坏文件失败：{e}")
+            return ""
+
     def save_feedback(
         self,
         image_path: str,
@@ -94,13 +108,26 @@ class AIAdvisor:
                     content = f.read()
                     if content.strip():
                         feedbacks = json.loads(content)
-            except (json.JSONDecodeError, IOError):
+                if not isinstance(feedbacks, list):
+                    raise ValueError("反馈文件结构异常")
+            except (ValueError, OSError) as e:
                 feedbacks = []
+                self._quarantine_feedback(e)   # 不静默丢历史反馈
 
         feedbacks.append(record)
 
-        with open(self.feedback_file, "w", encoding="utf-8") as f:
-            json.dump(feedbacks, f, ensure_ascii=False, indent=2)
+        # 临时文件 + 原子替换：直接覆盖写中途失败会把历史反馈全部打没。
+        tmp = self.feedback_file + ".tmp"
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(feedbacks, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, self.feedback_file)
+        except Exception:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+            raise
 
         # 同步写入缓存
         from core.analysis_cache import get_cache
