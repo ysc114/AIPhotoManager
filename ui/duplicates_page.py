@@ -615,7 +615,9 @@ class DuplicatesPage(QWidget):
 
     def _commit_cleanup(self, candidates):
         """执行清理：删除文件 + 记录清理 + 视觉索引条目移除（可测试入口）。"""
-        result = self._cleaner.delete_paths(candidates)
+        # 最后一道防线：任何被「保留」的路径都不进删除列表（防误删）
+        safe = [p for p in candidates if not self._visual.is_resolved(p)]
+        result = self._cleaner.delete_paths(safe)
         try:
             self._visual.remove_entries(result["deleted"])
         except Exception as e:

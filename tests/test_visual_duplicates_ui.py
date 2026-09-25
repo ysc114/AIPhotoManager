@@ -152,5 +152,16 @@ class VisualDuplicatesUiTests(unittest.TestCase):
         self.assertGreaterEqual(len(query_labels), 1)
 
 
+    def test_commit_cleanup_never_deletes_kept(self):
+        """回归：删除入口即使收到保留路径也不得删掉它。"""
+        self._wait_scan()
+        top = self.page._visual_groups[0]
+        a = top["photos"][0]["path"]
+        b = top["photos"][1]["path"]
+        self.page._visual.resolve(a, [b])
+        result = self.page._commit_cleanup([a, b])   # 故意把保留照片也传进去
+        self.assertIn(b, result["deleted"])
+        self.assertTrue(os.path.exists(a), "保留照片绝不得被删除")
+
 if __name__ == "__main__":
     unittest.main()

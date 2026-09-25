@@ -447,16 +447,29 @@ class VisualDuplicateIndex:
     # ---------- 人工决策 ----------
 
     def resolve(self, keep_path, candidate_paths):
-        """用户保留 keep_path：其余标记为待清理候选（不删除）。"""
+        """用户保留 keep_path：其余标记为待清理候选（不删除）。
+
+        安全约束（防误删）：
+        - 候选里若含「其它组已保留」的照片，一律跳过（保留优先于待清理）
+        - 本次保留的路径会从其它记录的候选里移除，避免「既保留又待清理」
+        """
         key = norm_path(keep_path)
+        kept_elsewhere = {k for k in self._resolved if k != key}
         item = self._resolved.get(key) or {"kept": key, "candidates": []}
-        merged = list(item["candidates"])
+        merged = [c for c in item["candidates"]
+                  if c != key and c not in kept_elsewhere]
         for p in candidate_paths:
             np = norm_path(p)
-            if np != key and np not in merged:
+            if np != key and np not in kept_elsewhere and np not in merged:
                 merged.append(np)
         self._resolved[key] = {"kept": key, "candidates": merged,
                                "at": datetime.now().isoformat(timespec="seconds")}
+        for other_key, rec in self._resolved.items():
+            if other_key == key:
+                continue
+            cands = rec.get("candidates", [])
+            if key in cands:
+                rec["candidates"] = [c for c in cands if c != key]
         self.save()
 
     def is_resolved(self, path):
@@ -464,8 +477,10 @@ class VisualDuplicateIndex:
         return norm_path(path) in self._resolved
 
     def candidate_mark(self, path):
-        """该路径是否被标记为"待清理候选"。"""
+        """是否为待清理候选（被保留的路径永远返回 False）。"""
         np_ = norm_path(path)
+        if np_ in self._resolved:
+            return False
         for rec in self._resolved.values():
             if np_ in rec.get("candidates", []):
                 return True
@@ -488,10 +503,19 @@ class VisualDuplicateIndex:
         return sorted([norm_path(a), norm_path(b)]) in self._ignored
 
     def pending_cleanup(self):
-        """全部已标记"待清理候选"路径（去重）。"""
+        """全部已标记「待清理候选」路径（去重）。
+
+        安全约束：永远排除任何被保留的路径；保留照片已不在磁盘的记录整条跳过
+        （否则可能把该组剩余副本也清空）。
+        """
+        kept = {k for k in self._resolved if os.path.exists(k)}
         out = set()
-        for rec in self._resolved.values():
-            out.update(rec.get("candidates", []))
+        for key, rec in self._resolved.items():
+            if key not in kept:
+                continue
+            for c in rec.get("candidates", []):
+                if c not in kept:
+                    out.add(c)
         return sorted(out)
 
     def remove_entries(self, paths):

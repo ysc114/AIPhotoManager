@@ -196,5 +196,43 @@ class VisualFingerprintTests(unittest.TestCase):
         self.assertEqual(data["version"], 1)
 
 
+    def test_kept_photo_never_marked_for_cleanup(self):
+        """回归：后一次「保留此张」不得把先前保留的照片标成待清理（防误删）。"""
+        idx = VisualDuplicateIndex(photos_dir=str(self.dir),
+                                   index_path=str(self.dir / "vis.json"))
+        idx.compute_all()
+        groups = idx.groups()
+        self.assertTrue(groups, "应找到疑似重复组")
+        phs = groups[0]["photos"]
+        self.assertGreaterEqual(len(phs), 3, "需要至少 3 张相似照片")
+        a, b, c = (p["path"] for p in phs[:3])
+
+        idx.resolve(b, [a, c])                 # 先保留 B
+        self.assertIn(a, idx.pending_cleanup())
+
+        idx.resolve(a, [b, c])                 # 之后在重叠分组里保留 A
+        pending = idx.pending_cleanup()
+        self.assertNotIn(b, pending, "先前保留的 B 不能被标成待清理")
+        self.assertNotIn(a, pending, "当前保留的 A 不能被标成待清理")
+        self.assertIn(c, pending)
+        self.assertFalse(idx.candidate_mark(b),
+                         "被保留的照片不应显示待清理徽标")
+        self.assertTrue(idx.is_resolved(b))
+
+    def test_pending_cleanup_skipped_when_kept_file_missing(self):
+        """保留照片已不在磁盘 → 该组清理建议作废（不把剩余副本清空）。"""
+        import os
+
+        idx = VisualDuplicateIndex(photos_dir=str(self.dir),
+                                   index_path=str(self.dir / "vis.json"))
+        idx.compute_all()
+        phs = idx.groups()[0]["photos"]
+        a, b = phs[0]["path"], phs[1]["path"]
+        idx.resolve(a, [b])
+        self.assertEqual(idx.pending_cleanup(), [b])
+        os.remove(a)                           # 用户手工删掉了保留照片
+        self.assertEqual(idx.pending_cleanup(), [],
+                         "保留照片已消失时不得再建议清理其余副本")
+
 if __name__ == "__main__":
     unittest.main()
