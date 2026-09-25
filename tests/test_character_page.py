@@ -289,6 +289,32 @@ class CharacterPageTests(unittest.TestCase):
         self.assertTrue(any("#007" in x for x in labels), labels)
         self.assertFalse(any("cid-uuid" in x for x in labels), labels)
 
+    def test_clear_grid_keeps_unrelated_pending_deletes(self):
+        """回归：_clear_grid 只派发本次删除的对象。
+
+        旧实现用 sendPostedEvents(None, DeferredDelete) 会连带处理其他页面
+        遗留的待删对象，在 offscreen 下曾出现主线程卡死。
+        """
+        from PySide6.QtWidgets import QVBoxLayout, QWidget
+
+        win = self.window
+        stray = QLabel("stray", win)
+        stray.deleteLater()               # 模拟其他页面遗留的待删对象
+
+        host = QWidget()
+        layout = QVBoxLayout(host)
+        cards = [QLabel("c%d" % i, host) for i in range(3)]
+        for card in cards:
+            layout.addWidget(card)
+
+        win._clear_grid(layout)
+        self.assertEqual(layout.count(), 0, "网格应被清空")
+        with self.assertRaises(RuntimeError):
+            cards[0].text()               # 本次删除的卡片已销毁
+        self.assertEqual(stray.text(), "stray",
+                         "无关待删对象不应被本次清理连带删除")
+        host.deleteLater()
+
 
 if __name__ == "__main__":
     unittest.main()

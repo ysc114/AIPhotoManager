@@ -790,16 +790,21 @@ class _RoleCenterMixinMixin:
         环境尤为明显）——不显式派发会导致卡片 C++ 对象滞留内存。真实
         app.exec() 事件循环中 sendPostedEvents 为幂等无副作用操作。
         """
+        doomed = []
         while grid_layout.count():
             item = grid_layout.takeAt(0)
             w = item.widget()
             if w:
+                doomed.append(w)
                 w.setParent(None)
                 w.deleteLater()
+        # 只派发本次删除的对象：sendPostedEvents(None, ...) 会连带处理其他页面/测试遗留的待删对象，
+        # 在 offscreen 环境曾出现主线程卡死在该调用内的情况。
         try:
             from PySide6.QtCore import QEvent
             from PySide6.QtWidgets import QApplication
-            QApplication.sendPostedEvents(None, QEvent.Type.DeferredDelete)
+            for w in doomed:
+                QApplication.sendPostedEvents(w, QEvent.Type.DeferredDelete)
         except Exception:
             pass
 
