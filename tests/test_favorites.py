@@ -120,6 +120,66 @@ class FavoriteTests(unittest.TestCase):
         self.assertEqual(win.image_list, before, "应恢复原列表")
         self.assertEqual(win._photo_list_mode, "")
 
+    def test_favorite_button_follows_plain_preview(self):
+        """普通照片页预览也能收藏：无角色上下文时按钮仍跟随状态。"""
+        import core.identity as identity_mod
+        from unittest import mock
+
+        photo = str(Path(__file__).resolve().parents[1] / "photos" / "12.png")
+        win = self.window
+        win.image_list = [photo]
+        win._photo_detection_context = None
+        win._populate_photo_list([photo], select=0)
+        win.show_preview(0)
+        self.app.processEvents()
+
+        raw = win._current_photo_path()
+        self.assertTrue(raw.endswith("12.png"),
+                        "回归：普通预览也要给出库内路径")
+
+        class _Mgr:
+            def __init__(_self):
+                _self.db = self.db
+
+            def close(_self):
+                pass
+
+        class _Reader:
+            def __init__(_self):
+                _self.db = self.db
+
+            def close(_self):
+                pass
+
+        with mock.patch.object(identity_mod, "IdentityManager", _Mgr), \
+                mock.patch.object(identity_mod, "get_reader", lambda: _Reader()):
+            win._sync_favorite_button()
+            self.assertEqual(win.btn_fav_toggle.text(), "⭐ 收藏当前")
+            self.db.add_favorite(raw)
+            win.show_preview(0)
+            self.assertIn("已收藏", win.btn_fav_toggle.text(),
+                          "已收藏照片预览时按钮应提示取消收藏")
+
+            win._toggle_favorite_current()      # 取消收藏
+            self.app.processEvents()
+            self.assertFalse(self.db.is_favorite(raw))
+            self.assertEqual(win.btn_fav_toggle.text(), "⭐ 收藏当前")
+
+            win._toggle_favorite_current()      # 再收藏
+            self.app.processEvents()
+            self.assertTrue(self.db.is_favorite(raw))
+            self.assertIn("已收藏", win.btn_fav_toggle.text())
+
+            win._remove_favorite(raw)          # 收藏页右键取消
+            self.app.processEvents()
+            self.assertFalse(self.db.is_favorite(raw))
+            self.assertEqual(win.btn_fav_toggle.text(), "⭐ 收藏当前",
+                             "删除后照片页按钮应回落")
+
+        win.show_preview(-1)
+        self.assertEqual(win.btn_fav_toggle.text(), "⭐ 收藏当前")
+        self.assertEqual(win._current_photo_path(), "")
+
 
 if __name__ == "__main__":
     unittest.main()

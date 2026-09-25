@@ -54,9 +54,11 @@ class GlobalSearchPanelTests(unittest.TestCase):
         got = []
         self.panel.search_requested.connect(got.append)
         self.panel.input.setText("白狼")
-        settle(self.app, 6)      # < 120ms：未触发
+        # 防抖窗口内同步断言（不依赖机器负载）
+        self.assertTrue(self.panel._debounce.isActive(),
+                        "输入后应启动防抖计时器")
         self.assertEqual(got, [])
-        settle(self.app, 8)      # 超过防抖
+        QTest.qWait(400)         # 远大于 120ms 防抖阈值
         self.assertEqual(got, ["白狼"])
         self.assertEqual(self.panel.query(), "白狼")
 

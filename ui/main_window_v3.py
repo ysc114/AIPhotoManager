@@ -131,6 +131,8 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
 
         self.current_image_path = None
         self._photo_detection_context = None
+        # 照片页最后预览的照片（供收藏按钮判断，独立于 detection 上下文）
+        self._preview_path = None
 
         self.current_ai_category = None
 
@@ -1853,6 +1855,7 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
             return
         row = getattr(self, "_photo_list_backup_row", 0) or 0
         self.image_list = list(backup)
+        self._photo_detection_context = None      # 清掉跳转来源的 detection 上下文
         self._photo_list_backup = None
         self._photo_list_mode = ""
         self._populate_photo_list(self.image_list, select=row)
@@ -1991,6 +1994,9 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
     def show_preview(self, row):
 
         if row < 0 or row >= len(self.image_list):
+            # 列表为空/越界：没有当前照片，收藏按钮回到提示态
+            self._preview_path = None
+            self._sync_favorite_button("")
             return
 
         path = self.image_list[row]
@@ -2041,6 +2047,10 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         except Exception as e:
             if self.default_info_label.isVisible():
                 self.default_info_label.setText(str(e))
+
+        # 记录当前预览照片 + 收藏按钮跟随其状态（已收藏 → 「★ 已收藏」）
+        self._preview_path = resolved_path
+        self._sync_favorite_button(resolved_path)
 
     # ===== AI面板辅助方法 =====
 

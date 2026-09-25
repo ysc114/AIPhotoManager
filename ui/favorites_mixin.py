@@ -152,12 +152,10 @@ class _FavoritesMixinMixin:
     def _toggle_favorite_current(self):
         """收藏/取消收藏照片页当前预览的照片（image_path 级）。"""
         from core.identity import IdentityManager
-        path = self._photo_detection_context.get("path") if self._photo_detection_context else None
-        if not path:
+        raw = self._current_photo_path()
+        if not raw:
             QMessageBox.information(self, "提示", "请先在照片页打开一张照片。")
             return
-        # 收藏键用库内绝对路径（还原 backslash → 与 identity_image 一致）
-        raw = path.replace("\\", "/")
         mgr = IdentityManager()
         try:
             if mgr.db.is_favorite(raw):
@@ -168,8 +166,46 @@ class _FavoritesMixinMixin:
                 msg = "已收藏"
         finally:
             mgr.close()
+        self._sync_favorite_button(raw)      # 按钮文案跟随新状态
         self.statusBar().showMessage(f"{msg}：{os.path.basename(raw)}", 3000)
 
+
+    def _current_photo_path(self):
+        """当前预览照片的库内路径（正斜杠，与收藏表一致）。优先照片页预览记录，回退角色墙跳转的 detection 上下文。"""
+
+        p = getattr(self, "_preview_path", None)
+        if not p:
+            ctx = getattr(self, "_photo_detection_context", None)
+            p = ctx.get("path") if isinstance(ctx, dict) else None
+        return str(p or "").replace("\\", "/")
+
+
+    def _sync_favorite_button(self, path=None):
+        """按当前照片的收藏状态刷新「⭐ 收藏当前」按钮（避免误以为只是收藏）。
+
+        无照片时恢复默认文案；读库失败按未收藏处理（只影响文案）。
+        """
+        btn = getattr(self, "btn_fav_toggle", None)
+        if btn is None:
+            return
+        raw = path if path is not None else self._current_photo_path()
+        raw = str(raw or "").replace("\\", "/")
+        if not raw:
+            btn.setText("⭐ 收藏当前")
+            btn.setToolTip("请先在照片页打开一张照片")
+            return
+        fav = False
+        try:
+            from core.identity import get_reader
+            fav = bool(get_reader().db.is_favorite(raw))
+        except Exception:
+            pass
+        if fav:
+            btn.setText("★ 已收藏（点击取消）")
+            btn.setToolTip("当前照片已在收藏中，点击取消收藏")
+        else:
+            btn.setText("⭐ 收藏当前")
+            btn.setToolTip("把当前照片加入收藏")
 
     def _remove_favorite(self, path):
         from core.identity import IdentityManager
@@ -179,6 +215,7 @@ class _FavoritesMixinMixin:
         finally:
             mgr.close()
         self._load_favorites_page()
+        self._sync_favorite_button()      # 当前预览若正是这张 → 文案回落
 
     # ------------------------------------------------------------
     # 待处理页（添加新照片 → 自动识别 → 兽装 Fursee / 人物 Face）
