@@ -921,7 +921,10 @@ class SettingsCenterPage(QWidget):
                 updated = datetime.datetime.fromtimestamp(
                     st["updated_at"]).strftime("%Y-%m-%d %H:%M")
             pending = st["indexed"] < st["photos_total"]
+            stale = int(st.get("stale") or 0)
             tail = "待更新" if pending else "已最新"
+            if stale:
+                tail += f" · 含 {stale} 张已删除（点上方更新可清理）"
             label.setText(
                 f"视觉索引：已索引 {st['indexed']}/{st['photos_total']} 张"
                 f" ｜ 模型 {st['model_name']}"

@@ -207,6 +207,43 @@ class VisualSearchIndex:
     # --------------------------------------------------------
     # 加入照片（增量 + MD5 去重）
     # --------------------------------------------------------
+    def prune_missing(self):
+        """清理「文件已不存在」的条目（删照片后索引与状态才不漂）。
+
+        起因：重复照片清理 / 手动删除后，索引仍留着死路径——
+        语义搜索会返回打不开的结果，状态行「已索引 N」也高于实际；
+        更麻烦的是这些 md5 会残留在 _md5_set 里，导致重新导入的同内容照片
+被误判为「重复」而永远不入索引。
+
+        返回被清理的条目数。
+        """
+        with self._lock:
+            if not self._entries:
+                return 0
+            alive, dead_ids = [], []
+            for i, e in enumerate(self._entries):
+                if os.path.exists(e.get("path", "") or ""):
+                    alive.append(e)
+                else:
+                    dead_ids.append(i)
+            if not dead_ids:
+                return 0
+            if self._index is not None:
+                import faiss
+                try:
+                    self._index.remove_ids(faiss.IDSelectorBatch(
+                        np.asarray(dead_ids, dtype=np.int64)))
+                except Exception as e:
+                    # 删不成就不动状态（避免 entries 与 向量位置脱节）。
+                    print(f"[visual_search] 清理失效条目失败：{e}")
+                    return 0
+            self._entries = alive
+            self._md5_set = {e.get("md5") for e in alive if e.get("md5")}
+            for i, e in enumerate(self._entries):   # id 与向量位置保持一致
+                e["id"] = i
+            self._save()
+            return len(dead_ids)
+
     def add_images(self, image_paths, encoder, progress_cb=None):
         """批量加入：只编码新照片；已索引 / MD5 重复的直接复用。
 
@@ -218,6 +255,12 @@ class VisualSearchIndex:
         if self._model is None:
             self._model = model_info
         dim = model_info["embedding_dimension"]
+        # 先清理已删除照片的条目：避免死路径被搜到、状态行数字漂，
+        # 也避免它们的 md5 把重新导入的同内容照片挡在索引外。
+        try:
+            self.prune_missing()
+        except Exception as e:
+            print(f"[visual_search] 清理失效条目失败（忽略）：{e}")
 
         # 1) 过滤：已索引（md5+size+mtime 相同）/ MD5 重复（内容完全一致）
         to_encode = []
@@ -325,13 +368,21 @@ class VisualSearchIndex:
                 out.append((self._entries[idx], float(D[0][j])))
         return out
 
+    @staticmethod
+    def _is_alive(entry):
+        """条目对应的文件是否仍存在（搜索时避免返回已删除照片）。"""
+        try:
+            return os.path.exists(entry.get("path", "") or "")
+        except (OSError, TypeError, ValueError):
+            return False
+
     def search_by_image(self, image_path, encoder, top_k=20):
-        """以图搜图：编码查询图 → 索引检索（排除自身路径）。"""
+        """以图搜图：编码查询图 → 索引检索（排除自身路径与已删除文件）。"""
         vec = encoder.encode(image_path)
         qpath = _norm(image_path)
         results = []
         for entry, sim in self.search(vec, top_k=top_k + 1):
-            if entry["path"] == qpath:
+            if entry["path"] == qpath or not self._is_alive(entry):
                 continue
             results.append({
                 "photo_id": entry["id"],
@@ -368,6 +419,8 @@ class VisualSearchIndex:
         best = {}
         for vec in vecs:
             for entry, sim in self.search(vec, top_k=top_k):
+                if not self._is_alive(entry):
+                    continue
                 pid = entry["id"]
                 prev = best.get(pid)
                 if prev is None or sim > prev[1]:
@@ -419,7 +472,7 @@ def read_index_status(cache_dir=None, photos_dir=None):
     status = {
         "state": "missing", "exists": False, "indexed": 0, "photos_total": 0,
         "model_name": "", "pretrained": "", "dimension": 0,
-        "updated_at": None,
+        "updated_at": None, "stale": 0,
     }
     if photos.is_dir():
         try:
@@ -439,10 +492,15 @@ def read_index_status(cache_dir=None, photos_dir=None):
     except (OSError, ValueError):
         status["state"] = "corrupt"
         return status
+    entries = meta.get("entries") or []
     model = meta.get("model") or {}
+    # stale：索引里指向已删除文件的条目数（只 stat，不加载 faiss）
+    stale = sum(1 for e in entries
+                if not os.path.exists(str((e or {}).get("path") or "")))
     status.update({
         "exists": True,
-        "indexed": len(meta.get("entries") or []),
+        "indexed": len(entries),
+        "stale": stale,
         "model_name": model.get("model_name") or "",
         "pretrained": model.get("pretrained") or "",
         "dimension": int(model.get("embedding_dimension") or 0),

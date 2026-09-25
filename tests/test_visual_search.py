@@ -413,6 +413,70 @@ class VisualIndexPersistenceTests(unittest.TestCase):
         self.assertEqual(
             read_index_status(cache_dir=str(cache))["state"], "missing")
 
+    def test_prune_missing_cleans_deleted_entries(self):
+        """删照片后更新索引 → 失效条目被清理，状态不再漂。"""
+        _, files = self._photos("prune_photos", 4)
+        cache = self.dir / "prune_cache"
+        idx = VisualSearchIndex(cache_dir=str(cache))
+        idx.add_images(files, self.encoder)
+        self.assertEqual(idx.count(), 4)
+
+        os.remove(files[0])
+        self.assertEqual(idx.prune_missing(), 1, "应清理 1 条失效条目")
+        self.assertEqual(idx.count(), 3)
+
+        dead = files[0].replace("\\", "/")
+        hits = idx.search_by_image(files[1], self.encoder, top_k=5)
+        self.assertNotIn(dead, {h["path"] for h in hits})
+
+        idx2 = VisualSearchIndex(cache_dir=str(cache))   # 已落盘，重载一致
+        self.assertEqual(idx2.count(), 3)
+        st = read_index_status(cache_dir=str(cache),
+                               photos_dir=str(self.dir / "prune_photos"))
+        self.assertEqual(st["indexed"], 3)
+        self.assertEqual(st["stale"], 0)
+
+    def test_reimport_same_content_after_delete_is_indexed(self):
+        """删除后重新导入同内容照片：不得被残留 md5 挡在索引外。"""
+        _, files = self._photos("reimport_photos", 2)
+        cache = self.dir / "reimport_cache"
+        idx = VisualSearchIndex(cache_dir=str(cache))
+        idx.add_images(files, self.encoder)
+
+        with open(files[0], "rb") as fh:
+            payload = fh.read()
+        os.remove(files[0])
+        again = str(self.dir / "reimport_photos" / "img_0_again.jpg")
+        with open(again, "wb") as fh:
+            fh.write(payload)
+
+        stats = idx.add_images([again], self.encoder)
+        self.assertEqual(
+            stats["new"], 1,
+            "同内容重新导入必须重新入索引（旧实现残留的 md5 会挡住）")
+        self.assertEqual(stats["skipped_md5"], 0)
+
+    def test_search_skips_deleted_after_last_build(self):
+        """删了照片但还没更新索引时，搜索也不得返回打不开的结果。"""
+        _, files = self._photos("alive_photos", 3)
+        idx = VisualSearchIndex(cache_dir=str(self.dir / "alive_cache"))
+        idx.add_images(files, self.encoder)
+        os.remove(files[0])                    # 故意不调用 prune_missing
+        hits = idx.search_by_image(files[1], self.encoder, top_k=5)
+        self.assertNotIn(files[0].replace("\\", "/"),
+                         {h["path"] for h in hits})
+
+    def test_read_index_status_reports_stale(self):
+        """状态读取（只 stat）报告失效条目数，供设置页提示。"""
+        _, files = self._photos("stale_photos", 3)
+        cache = self.dir / "stale_cache"
+        VisualSearchIndex(cache_dir=str(cache)).add_images(files, self.encoder)
+        os.remove(files[0])
+        st = read_index_status(cache_dir=str(cache),
+                               photos_dir=str(self.dir / "stale_photos"))
+        self.assertEqual(st["indexed"], 3)
+        self.assertEqual(st["stale"], 1)
+
 class QueryExpansionTests(unittest.TestCase):
     """中文查询扩展：CLIP 文本塔对中文偏弱，额外给出英文关键词提示词。
 
