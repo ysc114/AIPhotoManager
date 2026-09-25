@@ -27,6 +27,8 @@ from pathlib import Path
 
 import numpy as np
 
+from core.visual_search.query import expand_queries
+
 _DEFAULT_DIR = str(Path(__file__).resolve().parents[2] / "cache" / "visual_search")
 
 _PHOTO_EXTS = {".jpg", ".jpeg", ".png", ".webp"}
@@ -341,16 +343,39 @@ class VisualSearchIndex:
         return results
 
     def search_by_text(self, query_text, encoder, top_k=20):
-        """自然语言搜索：文本 embedding（与图像同一 CLIP 空间）→ 索引检索。"""
-        vec = encoder.encode_text(query_text)
-        results = []
-        for entry, sim in self.search(vec, top_k=top_k):
-            results.append({
-                "photo_id": entry["id"],
-                "path": entry["path"],
-                "similarity": round(sim, 4),
-            })
-        return results
+        """自然语言搜索：文本 embedding（与图像同一 CLIP 空间）→ 索引检索。
+
+        中文查询先扩展成英文提示词（CLIP 文本塔对中文几乎无效，见 query.py）；
+        也接受 str 列表（调用方已自行扩展时直接使用）。
+        """
+        if isinstance(query_text, (list, tuple)):
+            texts = [str(t) for t in query_text]
+        else:
+            texts = expand_queries(query_text)
+        return self.search_by_texts(texts, encoder, top_k=top_k)
+
+    def search_by_texts(self, texts, encoder, top_k=20):
+        """多查询文本检索：逐变体编码后按「每张照片的最大相似度」融合排序。
+
+        用于中文查询（原文 + 英文提示词取长补短）；单变体时与旧行为一致。
+        """
+        items = [str(t).strip() for t in (texts or []) if str(t or "").strip()]
+        if not items or self._index is None or self._index.ntotal == 0:
+            return []
+        vecs = np.asarray(encoder.encode_text(items), dtype=np.float32)
+        if vecs.ndim == 1:
+            vecs = vecs.reshape(1, -1)
+        best = {}
+        for vec in vecs:
+            for entry, sim in self.search(vec, top_k=top_k):
+                pid = entry["id"]
+                prev = best.get(pid)
+                if prev is None or sim > prev[1]:
+                    best[pid] = (entry, float(sim))
+        ranked = sorted(best.values(), key=lambda x: -x[1])
+        return [{"photo_id": entry["id"], "path": entry["path"],
+                 "similarity": round(float(sim), 4)}
+                for entry, sim in ranked[:max(1, int(top_k))]]
 
 
 # 模块级单例

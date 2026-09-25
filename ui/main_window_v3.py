@@ -1614,7 +1614,10 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
                         "payload": {"kind": "hint"},
                     })
                 else:
-                    for r in s_idx.search_by_text(q, enc, top_k=4):
+                    # 只看收藏时先多取候选再筛，避免「收藏外的高分结果先占满 top_k」
+                    hits = s_idx.search_by_text(
+                        q, enc, top_k=(20 if favorite_only else 4))
+                    for r in hits:
                         if favorite_only and r["path"] not in fav_set:
                             continue
                         semantic_items.append({
@@ -1624,6 +1627,8 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
                             "badge": "语义",
                             "payload": {"kind": "photo", "path": r["path"]},
                         })
+                        if len(semantic_items) >= 4:
+                            break
             else:
                 # 索引为空：后台构建一次（幂等），完成后自动刷新结果
                 self._start_semantic_build()

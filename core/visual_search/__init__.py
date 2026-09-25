@@ -19,9 +19,10 @@ from core.visual_search.index import (
     VisualSearchIndex, VisualSearchModelMismatch, get_index, reset_index,
     read_index_status, clear_index_files, default_cache_dir,
 )
+from core.visual_search.query import expand_queries
 from core.visual_search.search import (
     add_image, add_images, build_photo_index, search_by_image, search_by_text,
-    reset,
+    search_by_texts, reset,
 )
 
 __all__ = [
@@ -29,5 +30,5 @@ __all__ = [
     "VisualSearchIndex", "VisualSearchModelMismatch", "get_index", "reset_index",
     "read_index_status", "clear_index_files", "default_cache_dir",
     "add_image", "add_images", "build_photo_index", "search_by_image",
-    "search_by_text", "reset",
+    "search_by_text", "search_by_texts", "expand_queries", "reset",
 ]

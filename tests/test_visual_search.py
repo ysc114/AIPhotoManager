@@ -413,5 +413,179 @@ class VisualIndexPersistenceTests(unittest.TestCase):
         self.assertEqual(
             read_index_status(cache_dir=str(cache))["state"], "missing")
 
+class QueryExpansionTests(unittest.TestCase):
+    """中文查询扩展：CLIP 文本塔对中文偏弱，额外给出英文关键词提示词。
+
+    实测（240 张真实图库，同一张图最高相似度）：中文「兽装」0.220 → 英文 "a photo of fursuit" 0.318；
+    扩展后逐照片取最大相似度 → 只升不降。
+    """
+
+    def test_chinese_query_adds_english_prompt(self):
+        from core.visual_search.query import expand_queries
+
+        out = expand_queries("兽装")
+        self.assertIn("兽装", out, "保留原始查询")
+        self.assertTrue(any("fursuit" in v for v in out), out)
+        self.assertLessEqual(len(out), 4, "变体数受控（控制编码开销）")
+
+    def test_english_query_unchanged(self):
+        from core.visual_search.query import expand_queries
+
+        self.assertEqual(expand_queries("fursuit"), ["fursuit"])
+        self.assertEqual(expand_queries("a photo of a wolf"),
+                         ["a photo of a wolf"])
+
+    def test_longer_term_wins(self):
+        from core.visual_search.query import expand_queries
+
+        joined = " ".join(expand_queries("水果")).lower()
+        self.assertIn("fruit", joined)
+        self.assertNotIn("water", joined, "「水果」不应被单字「水」误判")
+
+    def test_mixed_query_keeps_both(self):
+        from core.visual_search.query import expand_queries
+
+        out = expand_queries("狼 fursuit")
+        self.assertIn("狼 fursuit", out)
+        self.assertTrue(any("wolf" in v for v in out), out)
+
+    def test_empty_query(self):
+        from core.visual_search.query import expand_queries
+
+        self.assertEqual(expand_queries(""), [])
+        self.assertEqual(expand_queries("   "), [])
+
+
+class _TextFakeEncoder:
+    """文本/图片都映射到固定向量的假编码器（验证多变体融合，不加载模型）。"""
+
+    def __init__(self, vectors, dim=4):
+        self._v = {k: np.asarray(v, dtype=np.float32)
+                   for k, v in vectors.items()}
+        self._dim = dim
+
+    def model_info(self):
+        return {"model_name": "ViT-L-14",
+                "pretrained": "datacomp_xl_s13b_b90k",
+                "embedding_dimension": self._dim,
+                "model_version": "fake"}
+
+    def encode(self, path, normalize=True):
+        return self._v[str(path)]
+
+    def encode_batch(self, paths, normalize=True, progress_cb=None):
+        out = []
+        for i, p in enumerate(paths):
+            out.append(self._v[str(p)])
+            if progress_cb:
+                progress_cb(i + 1, len(paths))
+        return out
+
+    def encode_text(self, texts, normalize=True):
+        single = isinstance(texts, str)
+        items = [texts] if single else list(texts)
+        arr = np.stack([self._v[str(t)] for t in items])
+        return arr[0] if single else arr
+
+
+class MultiVariantSearchTests(unittest.TestCase):
+    """多变体文本检索：逐照片取最大相似度（中文靠英文变体命中）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.dir = Path(self.tmp.name)
+        self.photos = self.dir / "photos"
+        self.photos.mkdir()
+        a, b = self.photos / "wolf.jpg", self.photos / "city.jpg"
+        a.write_bytes(b"fake-a")
+        b.write_bytes(b"fake-b")
+        # 索引内部统一用正斜杠路径，假编码器的键也要对齐
+        self.a = str(a).replace("\\", "/")
+        self.b = str(b).replace("\\", "/")
+        self.enc = _TextFakeEncoder({
+            self.a: [1, 0, 0, 0],
+            self.b: [0, 1, 0, 0],
+            "qn": [0, 0, 1, 0],                # 与两张都不相似
+            "a photo of wolf": [1, 0, 0, 0],   # 命中 a
+            "a photo of city": [0, 1, 0, 0],   # 命中 b
+        })
+        self.idx = VisualSearchIndex(cache_dir=str(self.dir / "cache"))
+        self.idx.add_images([self.a, self.b], self.enc)
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def test_single_variant_sorted(self):
+        hits = self.idx.search_by_text("a photo of wolf", self.enc, top_k=2)
+        self.assertEqual(hits[0]["path"], self.a)
+        self.assertAlmostEqual(hits[0]["similarity"], 1.0, places=3)
+
+    def test_multi_variant_takes_max_similarity(self):
+        hits = self.idx.search_by_texts(
+            ["qn", "a photo of city"], self.enc, top_k=2)
+        self.assertEqual(hits[0]["path"], self.b,
+                         "应按各变体中的最大相似度排序")
+        self.assertGreater(hits[0]["similarity"], hits[1]["similarity"])
+
+    def test_search_by_text_accepts_expanded_list(self):
+        hits = self.idx.search_by_text(["qn", "a photo of wolf"], self.enc, top_k=2)
+        self.assertEqual(hits[0]["path"], self.a, "列表入参视为已扩展，不再二次扩展")
+
+    def test_chinese_query_end_to_end_uses_mapping(self):
+        """中文查询「狼」→ 扩展出英文提示词 → 命中狼的照片。"""
+        from core.visual_search.query import expand_queries
+
+        variants = expand_queries("狼")
+        self.assertTrue(any("wolf" in v for v in variants), variants)
+        hits = self.idx.search_by_texts(
+            [v for v in variants if v in self.enc._v], self.enc, top_k=2)
+        self.assertEqual(hits[0]["path"], self.a)
+
+
+class TextEmbeddingCacheTests(unittest.TestCase):
+    """文本向量缓存：同一查询重复编码不再调用模型。"""
+
+    def test_repeated_query_hits_cache(self):
+        import torch
+
+        from core.visual_search import ClipImageEncoder
+
+        calls = {"n": 0}
+
+        class _FakeTokens:
+            def __init__(self, n):
+                self.n = n
+
+            def to(self, device):
+                return self
+
+        class _FakeTextModel:
+            def encode_text(self, tokens):
+                calls["n"] += 1
+                n = max(1, int(getattr(tokens, "n", 1)))
+                return torch.arange(1, n * 4 + 1,
+                                    dtype=torch.float32).reshape(n, 4)
+
+            def cpu(self):
+                return self
+
+        enc = ClipImageEncoder(device="cpu")
+        enc._model = _FakeTextModel()
+        enc._dim = 4
+        try:
+            with mock.patch("open_clip.get_tokenizer",
+                            return_value=lambda items: _FakeTokens(len(list(items)))):
+                v1 = enc.encode_text("hello")
+                v2 = enc.encode_text("hello")
+                v3 = enc.encode_text(["hello", "world"])
+            self.assertEqual(calls["n"], 2,
+                             "重复查询应命中缓存，只编码新文本")
+            np.testing.assert_allclose(v1, v2)
+            self.assertEqual(v3.shape, (2, 4))
+            self.assertTrue(np.allclose(np.linalg.norm(v3, axis=1), 1.0, atol=1e-5))
+        finally:
+            enc.close()
+        self.assertEqual(enc._text_cache, {}, "close() 后缓存清空（模型释放）")
+
 if __name__ == "__main__":
     unittest.main()

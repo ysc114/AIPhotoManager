@@ -64,6 +64,10 @@ def resolve_device(requested=None):
     return "cuda" if _cuda_available() else "cpu"
 
 
+#: 文本向量缓存上限（条；768D 约 3KB/条）
+_TEXT_CACHE_MAX = 64
+
+
 class ClipImageEncoder:
     """OpenCLIP 图像编码器（懒加载 + 归一化 + 单例复用）。"""
 
@@ -76,6 +80,8 @@ class ClipImageEncoder:
         self._preprocess = None
         self._dim = None
         self._lock = threading.Lock()
+        # 文本向量缓存：同一查询重复编码（面板每次重渲染、中文扩展变体复用）
+        self._text_cache = {}
 
     # --------------------------------------------------------
     # 加载
@@ -163,18 +169,34 @@ class ClipImageEncoder:
         import torch
         import open_clip
         single = isinstance(texts, str)
-        items = [texts] if single else list(texts)
-        tokenizer = open_clip.get_tokenizer(self.model_name)
-        tokens = tokenizer(items).to(self.device)
-        with torch.no_grad():
-            feat = self._model.encode_text(tokens)
-            if normalize:
-                feat = feat / feat.norm(dim=-1, keepdim=True)
-        arr = feat.cpu().numpy().astype(np.float32)
+        items = [str(t) for t in ([texts] if single else list(texts))]
+        if not items:
+            return np.zeros((0, self.dim), dtype=np.float32)
+
+        cache = self._text_cache if normalize else None
+        todo = items if cache is None else [t for t in items
+                                            if t not in cache]
+        if todo:
+            tokenizer = open_clip.get_tokenizer(self.model_name)
+            tokens = tokenizer(todo).to(self.device)
+            with torch.no_grad():
+                feat = self._model.encode_text(tokens)
+                if normalize:
+                    feat = feat / feat.norm(dim=-1, keepdim=True)
+            fresh = feat.cpu().numpy().astype(np.float32)
+            if cache is not None:
+                for text, vec in zip(todo, fresh):
+                    cache[text] = vec
+                while len(cache) > _TEXT_CACHE_MAX:
+                    cache.pop(next(iter(cache)))   # FIFO 淘汰最早的
+
+        arr = (np.stack([cache[t] for t in items])
+               if cache is not None else fresh)
         return arr[0] if single else arr
 
     def close(self):
         """释放模型（测试/进程退出用）。"""
+        self._text_cache.clear()   # 模型释放后向量失效
         if self._model is not None:
             self._model.cpu()
             self._model = None
