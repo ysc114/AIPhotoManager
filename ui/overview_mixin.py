@@ -9,7 +9,7 @@ import os
 
 from PySide6.QtCore import Qt, QPoint, QEvent
 from PySide6.QtCore import QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QPixmap, QColor, QIcon
+from PySide6.QtGui import QPixmap, QColor
 from PySide6.QtWidgets import QLabel, QWidget, QFrame, QPushButton, QGridLayout, QVBoxLayout, QHBoxLayout, QMessageBox, QMenu, QListWidget, QListWidgetItem, QInputDialog, QDialog, QDialogButtonBox, QAbstractItemView, QGraphicsOpacityEffect, QGraphicsDropShadowEffect
 
 from config.settings_manager import settings as S
@@ -756,7 +756,12 @@ class _OverviewMixinMixin:
             else None
         )
         idx = raw_images.index(image_path)
+        # 快照原列表（未处于过滤态时），并进入 group 模式 → 可一键返回全部
+        if getattr(self, "_photo_list_mode", "") not in ("similar", "group"):
+            self._photo_list_backup = list(self.image_list or [])
+            self._photo_list_backup_row = self.image_list_widget.currentRow()
         self.image_list = images
+        self._photo_list_mode = "group"
         self._photo_detection_context = {
             "row": idx,
             "path": self._resolve_display_path(image_path),
@@ -766,17 +771,10 @@ class _OverviewMixinMixin:
                 group, 1, "角色"
             ),
         }
-        self.image_list_widget.clear()
-        for path in images:
-            item = QListWidgetItem(os.path.basename(path))
-            pix = QPixmap(self._resolve_display_path(path))
-            if not pix.isNull():
-                item.setIcon(
-                    QIcon(pix.scaled(110, 110, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-                )
-            self.image_list_widget.addItem(item)
-        self.nav_list.setCurrentRow(1)
-        self.image_list_widget.setCurrentRow(idx)
+        # 统一列表填充：缩略图缓存优先 + 后台补图（此前逐张同步解码原图）
+        self._populate_photo_list(images, select=idx)
+        # 修复：此前 setCurrentRow(1) 指向旧的「AI精选」索引，实际切错页
+        self._switch_page(self.content_stack.indexOf(self.photo_page))
         self.statusBar().showMessage(
             f"已在照片页打开：{os.path.basename(image_path)}"
             + (f"（detection {detection_index}）" if detection_index is not None else "")

@@ -93,10 +93,15 @@ class PhotoListRestoreTests(unittest.TestCase):
         self.assertEqual(self.win._photo_list_backup, [PHOTO_A, PHOTO_B],
                          "连续搜索不应把相似结果当成原始列表")
 
-    def test_restore_without_backup_is_safe(self):
+    def test_restore_without_backup_falls_back_to_library(self):
+        """无快照（如角色墙跳转前照片页为空）→ 回落到自动载入 photos/。"""
         self.win._photo_list_backup = None
+        self.win.image_list = []
+        self.win._photos_autoload_done = False
         self.win._restore_photo_list()
-        self.assertIn("没有可恢复", self.win.statusBar().currentMessage())
+        self.app.processEvents()
+        self.assertTrue(self.win.image_list, "应自动载入 photos/")
+        self.assertEqual(self.win._photo_list_mode, "")
         self.assertTrue(self.win.btn_restore_list.isHidden())
 
     def test_open_folder_resets_similar_mode(self):
@@ -162,6 +167,69 @@ class PhotoAutoLoadTests(unittest.TestCase):
         self.win._on_bottom_nav_changed(self._photo_page_row())
         self.assertEqual(self.win.image_list, [],
                          "只自动载入一次，避免反复覆盖用户上下文")
+
+
+class GroupJumpTests(unittest.TestCase):
+    """角色墙点照片 → 落到照片页 + 可返回全库（回归：曾切到 AI精选页）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        from ui.main_window_v3 import MainWindow
+        self.win = MainWindow()
+        self.win._ui_ready = True
+        self.win.show()
+        self.app.processEvents()
+        from core.identity import get_reader
+        groups = [g for g in get_reader().get_groups("fursuit_character")
+                  if g.get("images")]
+        self.assertTrue(groups, "库中应有带照片的兽装角色")
+        self.group = groups[0]
+
+    def tearDown(self):
+        self.win.close()
+
+    def _jump(self):
+        self.win._open_group("fursuit", self.group, "测试角色")
+        self.app.processEvents()
+        members = self.win._group_pages["fursuit"].get("current_members") or []
+        self.assertTrue(members)
+        p, det = members[0]
+        self.win._open_photo_in_photo_page(self.group, p, det)
+        self.app.processEvents()
+        return p
+
+    def test_jump_lands_on_photo_page_with_restore(self):
+        self.win._on_bottom_nav_changed(
+            self.win.content_stack.indexOf(self.win.photo_page))
+        self.app.processEvents()
+        full = list(self.win.image_list)
+        self.assertTrue(full)
+
+        self._jump()
+        self.assertIs(self.win.content_stack.currentWidget(),
+                      self.win.photo_page, "应切换到照片页（曾误切 AI精选页）")
+        self.assertEqual(self.win._photo_list_mode, "group")
+        self.assertFalse(self.win.btn_restore_list.isHidden(),
+                         "跳转后应显示「返回全部」")
+
+        self.win._restore_photo_list()
+        self.app.processEvents()
+        self.assertEqual(self.win.image_list, full, "应恢复到跳转前的全库列表")
+        self.assertEqual(self.win._photo_list_mode, "")
+        self.assertTrue(self.win.btn_restore_list.isHidden())
+
+    def test_restore_after_jump_from_empty_page_loads_library(self):
+        self.assertEqual(self.win.image_list, [], "进入前照片页应为空")
+        self._jump()
+        self.assertTrue(self.win.image_list, "跳转后应显示该角色照片")
+        self.win._restore_photo_list()
+        self.app.processEvents()
+        self.assertTrue(self.win.image_list,
+                        "原本为空 → 返回全部应自动载入 photos/")
+        self.assertEqual(self.win._photo_list_mode, "")
 
 
 if __name__ == "__main__":
