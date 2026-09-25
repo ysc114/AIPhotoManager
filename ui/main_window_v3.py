@@ -726,9 +726,16 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         self.bottom_nav.move(max(0, x), max(0, y))
 
     def _on_bottom_nav_changed(self, idx):
-        """底部导航点击 → 切页（与左侧导航同一路由）。"""
+        """底部导航点击 → 切页（与左侧导航同一路由）。
+
+        注意：setCurrentRow 会同步触发 currentRowChanged → _switch_page，
+        此前末尾又显式调一次，导致每次点击页面钩子（扫描/刷新/懒加载）跑两遍。
+        这里先屏蔽信号再设行，最后统一切页一次。
+        """
         if idx != self.nav_list.currentRow():
+            blocked = self.nav_list.blockSignals(True)
             self.nav_list.setCurrentRow(idx)
+            self.nav_list.blockSignals(blocked)
         self._switch_page(idx)
 
     def resizeEvent(self, event):

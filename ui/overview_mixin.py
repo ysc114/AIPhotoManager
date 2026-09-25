@@ -332,11 +332,6 @@ class _OverviewMixinMixin:
         if hasattr(self, "bottom_nav"):
             self.bottom_nav.set_current(row)
 
-        # 重复照片页：首次进入才扫描（启动不做全库 MD5/指纹检查）
-        dup = getattr(self, "duplicates_page", None)
-        if dup is not None and self.content_stack.indexOf(dup) == row:
-            dup.ensure_scanned()
-
         # 照片页：首次进入自动载入 photos/（列表非空则不动）
         photo_page = getattr(self, "photo_page", None)
         if photo_page is not None and self.content_stack.indexOf(photo_page) == row:
@@ -364,23 +359,42 @@ class _OverviewMixinMixin:
         # Phase 2：切到分组页（兽装3/人物4/角色5）时懒加载组列表
         # （同样受 _ui_ready 保护，避免测试进程触发后端读取）
         if self._ui_ready:
-            page_key_map = {3: "fursuit", 4: "person", 5: "character"}
-            key = page_key_map.get(row)
-            if key and not self._group_page_loaded.get(key, False):
-                self._load_groups_into_page(key)
-                self._group_page_loaded[key] = True
-            # AI 精选页（row 1）：进入时刷新（读缓存或空态）
-            if row == 1:
+            # 页面钩子一律按内容栈索引定位（不写死页序，页序调整也不会错位）
+            idx_of = self.content_stack.indexOf
+
+            # 分组页：首次进入懒加载
+            for key, attr in (("fursuit", "fursuit_page"),
+                              ("person", "person_page"),
+                              ("character", "character_page")):
+                page = getattr(self, attr, None)
+                if page is not None and idx_of(page) == row \
+                        and not self._group_page_loaded.get(key, False):
+                    self._load_groups_into_page(key)
+                    self._group_page_loaded[key] = True
+
+            # AI 精选页：进入时刷新（读缓存或空态）
+            ai_page = getattr(self, "ai_pick_page", None)
+            if ai_page is not None and idx_of(ai_page) == row:
                 self._refresh_ai_pick_page()
-            # Phase 3-1：收藏页（row 6）懒加载收藏列表
-            if row == 6:
+
+            # 收藏页：进入时懒加载收藏列表
+            fav_page = getattr(self, "favorites_page", None)
+            if fav_page is not None and idx_of(fav_page) == row:
                 self._load_favorites_page()
-            # Phase 3-3：设置页（row 8）懒刷新状态
-            if row == 8:
+
+            # 设置页：进入时刷新动态数据
+            settings_page = getattr(self, "settings_page", None)
+            if settings_page is not None and idx_of(settings_page) == row:
                 self._refresh_settings_page()
-            # ♻️ 重复照片页（row 9）：进入时重新扫描
-            if row == 9:
-                self.duplicates_page.refresh()
+
+            # 重复照片页：首次进入完整扫描，之后再进入快速重扫
+            # （此前 ensure_scanned + refresh 会在首次进入扫两遍）
+            dup = getattr(self, "duplicates_page", None)
+            if dup is not None and idx_of(dup) == row:
+                if getattr(dup, "_scanned", False):
+                    dup.refresh()
+                else:
+                    dup.ensure_scanned()
 
 
     def _fade_in_page(self):

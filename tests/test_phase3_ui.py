@@ -112,6 +112,35 @@ class Phase3UiTests(unittest.TestCase):
                          win.content_stack.indexOf(win.pending_page),
                          "应切到待处理页")
 
+    def test_bottom_nav_dispatches_switch_page_once(self):
+        """底部导航每次点击只派发一次切页（此前 setCurrentRow + 显式调用跑两遍）。"""
+        from unittest import mock
+        win = self.window
+        with mock.patch.object(win, "_switch_page") as sw:
+            win._on_bottom_nav_changed(7)
+        self.assertEqual(sw.call_count, 1, "每次点击只应派发一次")
+        self.assertEqual(win.nav_list.currentRow(), 7, "左侧导航应同步到同一行")
+
+    def test_reentry_refreshes_duplicates_once_per_entry(self):
+        """重复照片页每次进入恰好扫描一次（首次 1 次 + 再进入 1 次）。"""
+        win = self.window
+        dup_row = win.content_stack.indexOf(win.duplicates_page)
+        calls = []
+        orig = win.duplicates_page.refresh
+
+        def counted():
+            calls.append(1)
+            return orig()
+
+        win.duplicates_page.refresh = counted
+        try:
+            win._on_bottom_nav_changed(dup_row)
+            win._on_bottom_nav_changed(0)
+            win._on_bottom_nav_changed(dup_row)
+        finally:
+            win.duplicates_page.refresh = orig
+        self.assertEqual(len(calls), 2, f"应恰好扫描 2 次，实际 {len(calls)}")
+
 
 if __name__ == "__main__":
     unittest.main()
