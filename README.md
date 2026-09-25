@@ -299,7 +299,7 @@ QT_QPA_PLATFORM=offscreen C:/Program Files/Python310/python.exe -m unittest disc
 
 ### 测试规模（2026-09-25）
 
-`tests/` 共 **39 个测试文件 / 363 项**，全绿（运行结束进程退出码 0）；其中 2 个文件需要加载模型
+`tests/` 共 **39 个测试文件 / 365 项**，全绿（运行结束进程退出码 0）；其中 2 个文件需要加载模型
 （`test_visual_search` 约 52s、`test_character_center` 约 48s），其余文件合计约 2 分钟。
 
 ### 性能基线（2026-09-25 实测，offscreen，194 张照片）
@@ -312,6 +312,7 @@ QT_QPA_PLATFORM=offscreen C:/Program Files/Python310/python.exe -m unittest disc
 | 总览统计刷新（首次 / 热） | 0.04s / 0.01s |
 | 待处理页统计（热；冷启动含首次 import） | 0.02s / ~2s |
 | 全库重复扫描 `DuplicateScanner.scan()` | 0.02s |
+| 入库去重全库 MD5 统计（真实图库 167 张 / 198MB） | 首次 0.42s、二次 0.014s（原每次整库读盘 0.38s） |
 | 照片列表填充（全库 162 张，缓存优先 + 后台补图） | ~0.11s（改前 5.5s） |
 | 收藏页瓦片渲染（50 张，缓存优先 + 后台补图） | ~0.06s（改前 2.2s） |
 | 照片页首次自动载入全库（194 张） | ~0.18s（图标 1.2s 内后台补齐） |
