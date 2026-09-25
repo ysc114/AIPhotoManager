@@ -14,7 +14,7 @@ from ui.settings_center import SettingsCenterPage
 from ui.aurora_card import AuroraGlassCard
 
 
-from PySide6.QtCore import Qt, QSize, QTimer, QRect, QThread, Signal
+from PySide6.QtCore import Qt, QSize, QTimer, QRect, QPoint, QThread, Signal
 from PySide6.QtGui import (
     QIcon,
     QPixmap,
@@ -932,6 +932,15 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
             self.btn_similar
         )
 
+        # 🎭 同框角色（反向查询：这张照片里有哪些角色，可跳转）
+        self.btn_roles = QPushButton(
+            "🎭 同框角色"
+        )
+        self.btn_roles.setToolTip("查看这张照片里的角色，并跳转到对应角色页")
+        button_layout.addWidget(
+            self.btn_roles
+        )
+
         right.addLayout(
             button_layout
         )
@@ -1377,6 +1386,10 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
             self.extract_video_frames
         )
 
+        self.btn_roles.clicked.connect(
+            self._show_photo_roles
+        )
+
         self.btn_similar.clicked.connect(
             self._find_similar_photos
         )
@@ -1664,6 +1677,39 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
             self._open_group_from_search(payload["group"])
         elif payload.get("path"):
             self._open_photo_by_path(payload["path"])
+
+    def _photo_roles_refs(self, path):
+        """照片页反向查询：这张照片里的角色（先原样查，再标准化兜底）。"""
+        refs = self._image_group_refs(path)
+        if not refs:
+            alt = os.path.abspath(path).replace("\\", "/")
+            if alt != path:
+                refs = self._image_group_refs(alt)
+        return refs
+
+    def _show_photo_roles(self):
+        """照片页：列出当前预览照片里的角色，选中即跳转该角色详情页。"""
+        path = self.current_image_path
+        if not path and self.image_list:
+            row = self.image_list_widget.currentRow()
+            path = (self.image_list[row]
+                    if 0 <= row < len(self.image_list) else self.image_list[0])
+        if not path:
+            self.statusBar().showMessage("请先在照片页选择一张照片", 3000)
+            return
+        refs = self._photo_roles_refs(path)
+        if not refs:
+            self.statusBar().showMessage("这张照片还没有角色归属", 4000)
+            return
+        menu = self._build_multi_role_menu(
+            refs, header=f"📸 这张照片里有 {len(refs)} 个角色")
+        chosen = menu.exec(self.btn_roles.mapToGlobal(
+            QPoint(0, self.btn_roles.height() + 2)))
+        if chosen is None:
+            return
+        cid = chosen.data()
+        if cid:
+            self._open_group_by_id(cid)
 
     # ------------------------------------------------------------
     # 🔎 查找相似照片（视觉 Embedding + FAISS，后台线程；智能搜索第 2 层）

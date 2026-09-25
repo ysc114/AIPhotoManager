@@ -593,8 +593,8 @@ class _OverviewMixinMixin:
         self._open_group_from_search(groups[0])
         return True
 
-    def _build_multi_role_menu(self, refs):
-        """构建「合照里的其他角色」菜单（只构建不弹窗，便于单测）。"""
+    def _build_multi_role_menu(self, refs, header=None):
+        """构建「照片里的角色」菜单（只构建不弹窗，便于单测）。"""
         menu = QMenu(self)
         menu.setStyleSheet(
             "QMenu{background:rgba(252,253,255,0.98);border:1px solid "
@@ -602,12 +602,16 @@ class _OverviewMixinMixin:
             "QMenu::item{padding:5px 18px 5px 12px;border-radius:6px;"
             "font-size:12.5px;color:#2a3a52;}"
             "QMenu::item:selected{background:rgba(120,160,255,0.22);}")
-        menu.addAction(f"📸 这张合照里还有其他 {len(refs)} 个角色")
+        menu.addAction(header or f"📸 这张照片里有 {len(refs)} 个角色")
         menu.addSeparator()
         for ref in refs[:40]:
             cid = str(ref.get("character_id") or "")
             label = ref.get("name") or f"角色 {cid[:10]}"
-            act = menu.addAction(f"🎭 {label}")
+            n_photos = int(ref.get("photos") or 0)
+            suffix = f" · {n_photos} 张照片" if n_photos else ""
+            act = menu.addAction(f"🎭 {label}{suffix}")
+            act.setToolTip(
+                f"detection #{int(ref.get('detection_index') or 0)}")
             act.setData(cid)
         return menu
 
@@ -617,7 +621,9 @@ class _OverviewMixinMixin:
                 if str(r.get("character_id") or "") != str(current_cid or "")]
         if not refs:
             return
-        menu = self._build_multi_role_menu(refs)
+        header = (f"📸 这张合照里还有其他 {len(refs)} 个角色"
+                  if current_cid else f"📸 这张照片里有 {len(refs)} 个角色")
+        menu = self._build_multi_role_menu(refs, header=header)
         chosen = menu.exec(widget.mapToGlobal(QPoint(0, widget.height() + 2)))
         if chosen is None:
             return

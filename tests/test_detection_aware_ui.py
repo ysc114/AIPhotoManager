@@ -219,13 +219,15 @@ class DetectionAwareUiTests(unittest.TestCase):
                 {"character_id": "cid-current", "name": "当前角色",
                  "type": "fursuit_character"},
                 {"character_id": "cid-other", "name": "同框角色",
-                 "type": "fursuit_character"},
+                 "type": "fursuit_character", "photos": 12},
             ]
             others = [r for r in refs if r["character_id"] != "cid-current"]
             menu = window._build_multi_role_menu(others)
             labels = [a.text() for a in menu.actions() if a.text()]
             data = [a.data() for a in menu.actions() if a.data()]
             self.assertTrue(any("同框角色" in x for x in labels))
+            self.assertTrue(any("12 张照片" in x for x in labels),
+                            "无名角色也应按照片数区分")
             self.assertEqual(data, ["cid-other"])
 
             class _StubAction:
@@ -264,6 +266,61 @@ class DetectionAwareUiTests(unittest.TestCase):
         finally:
             window.close()
             shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_photo_page_roles_button_jumps(self):
+        """照片页「同框角色」：列出该照片的角色并跳转。"""
+        window = MainWindow()
+        try:
+            window.current_image_path = "C:/fake/photo.jpg"
+            refs = [{"character_id": "cid-a", "name": "", "type": "fursuit_character",
+                     "photos": 3, "detection_index": 0},
+                    {"character_id": "cid-b", "name": "", "type": "fursuit_character",
+                     "photos": 5, "detection_index": 1}]
+
+            class _StubAction:
+                def data(self):
+                    return "cid-b"
+
+            class _StubMenu:
+                def exec(self, *args, **kwargs):
+                    return _StubAction()
+
+            captured = {}
+
+            def _build(refs_arg, header=None):
+                captured["header"] = header
+                captured["n"] = len(refs_arg)
+                return _StubMenu()
+
+            with mock.patch.object(window, "_photo_roles_refs",
+                                   return_value=refs), \
+                    mock.patch.object(window, "_build_multi_role_menu", _build), \
+                    mock.patch.object(window, "_open_group_by_id") as jump:
+                window._show_photo_roles()
+            self.assertEqual(captured["n"], 2)
+            self.assertIn("这张照片里有 2 个角色", captured["header"])
+            jump.assert_called_once_with("cid-b")
+        finally:
+            window.close()
+
+    def test_photo_page_roles_button_click_and_hint(self):
+        """按钮已接线；无角色归属时给提示而不是弹菜单。"""
+        window = MainWindow()
+        try:
+            with mock.patch.object(window, "_show_photo_roles") as handler:
+                QTest.mouseClick(window.btn_roles, Qt.LeftButton)
+            self.assertTrue(handler.called, "按钮应触发 _show_photo_roles")
+
+            window.current_image_path = "C:/fake/none.jpg"
+            with mock.patch.object(window, "_photo_roles_refs", return_value=[]), \
+                    mock.patch.object(window, "_build_multi_role_menu") as build:
+                window._show_photo_roles()
+            self.assertFalse(build.called, "没有角色归属时不应弹菜单")
+            self.assertIn("还没有角色归属",
+                          window.statusBar().currentMessage())
+        finally:
+            window.close()
+
 
 if __name__ == "__main__":
     unittest.main()

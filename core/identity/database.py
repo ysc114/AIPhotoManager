@@ -412,7 +412,10 @@ class IdentityDatabase:
             return []
         rows = self.conn.execute(
             """SELECT i.group_id, g.name, g.type,
-                      i.detection_index, i.bbox, i.confidence, i.embedding_type
+                      i.detection_index, i.bbox, i.confidence, i.embedding_type,
+                      (SELECT COUNT(DISTINCT i2.image_path)
+                         FROM identity_image AS i2
+                        WHERE i2.group_id = i.group_id) AS photos
                FROM identity_image AS i
                LEFT JOIN identity_group AS g ON g.id = i.group_id
                WHERE i.image_path = ? AND i.group_id <> ''
@@ -423,7 +426,7 @@ class IdentityDatabase:
             {"character_id": r[0] or "", "name": r[1] or "",
              "type": r[2] or "", "detection_index": int(r[3] or 0),
              "bbox": r[4] or "", "confidence": float(r[5] or 0.0),
-             "embedding_type": r[6] or ""}
+             "embedding_type": r[6] or "", "photos": int(r[7] or 0)}
             for r in rows
         ]
 
