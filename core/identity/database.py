@@ -373,6 +373,35 @@ class IdentityDatabase:
                 "embedding_type", "bbox", "layer1_category", "confidence", "added_at"]
         return [self._row_to_dict(r, cols) for r in rows]
 
+    def count_groups_by_image(self, paths=None):
+        """按 image_path 统计所属角色组数（只读）。
+
+        用途：多人合照「同时属于 N 个角色」的界面可见化。
+        paths=None → 全量；传入路径列表 → 分块 IN 查询（规避 SQLite
+        变量上限），只统计给定照片。
+        """
+        if paths is not None:
+            unique = [str(p) for p in dict.fromkeys(paths or []) if p]
+            out = {}
+            for i in range(0, len(unique), 400):
+                chunk = unique[i:i + 400]
+                marks = ",".join("?" for _ in chunk)
+                rows = self.conn.execute(
+                    f"""SELECT image_path, COUNT(DISTINCT group_id)
+                        FROM identity_image
+                        WHERE group_id <> '' AND image_path IN ({marks})
+                        GROUP BY image_path""",
+                    chunk,
+                ).fetchall()
+                out.update({r[0]: int(r[1]) for r in rows})
+            return out
+        rows = self.conn.execute(
+            """SELECT image_path, COUNT(DISTINCT group_id)
+               FROM identity_image WHERE group_id <> ''
+               GROUP BY image_path"""
+        ).fetchall()
+        return {r[0]: int(r[1]) for r in rows}
+
     def get_all_embeddings(self, embedding_type=None, include_detection_index=False):
         """读取全部（或指定类型）非空 embedding。
 

@@ -1505,14 +1505,26 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
             s_idx = get_index()
             if s_idx.count() > 0:
                 enc = get_encoder()
-                for r in s_idx.search_by_text(q, enc, top_k=4):
+                if not enc.is_loaded():
+                    # 首次语义搜索要加载 CLIP（约 10s）：放后台预热，
+                    # 完成后由 _on_semantic_build_done 自动重渲染结果，
+                    # 避免主线程卡住整个界面。
+                    self._start_semantic_build()
                     semantic_items.append({
-                        "icon": "🧠",
-                        "title": os.path.basename(r["path"]),
-                        "subtitle": f"语义相似 {r['similarity'] * 100:.0f}%",
-                        "badge": "语义",
-                        "payload": {"kind": "photo", "path": r["path"]},
+                        "icon": "⏳",
+                        "title": "语义模型加载中…（首次约 10 秒）",
+                        "subtitle": "完成后自动刷新结果", "badge": "语义",
+                        "payload": {"kind": "hint"},
                     })
+                else:
+                    for r in s_idx.search_by_text(q, enc, top_k=4):
+                        semantic_items.append({
+                            "icon": "🧠",
+                            "title": os.path.basename(r["path"]),
+                            "subtitle": f"语义相似 {r['similarity'] * 100:.0f}%",
+                            "badge": "语义",
+                            "payload": {"kind": "photo", "path": r["path"]},
+                        })
             else:
                 # 索引为空：后台构建一次（幂等），完成后自动刷新结果
                 self._start_semantic_build()

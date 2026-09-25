@@ -129,25 +129,28 @@ class GlobalSearchWindowTests(unittest.TestCase):
     def test_query_and_result_dispatch(self):
         self.win._open_global_search()
         settle(self.app, 6)
-        # 空查询 → 最近搜索（空列表也安全）
-        self.win._on_global_search_query("")
-        # 查询"兽装"（类别匹配：应命中兽装角色组；无库数据时跳过）
-        self.win._on_global_search_query("兽装")
-        settle(self.app, 4)
-        if self.win._global_search._items:
-            self.assertGreater(len(self.win._global_search._items), 0)
-        else:
-            self.skipTest("库中无兽装角色组")
-        # 无结果查询 → 无真实结果 + 面板有提示（不空白）
-        self.win._on_global_search_query("__no_such_thing__")
-        settle(self.app, 4)
+        # 索引已存在时语义分区会后台预热模型：测试里桩掉，避免真加载
+        with mock.patch.object(self.win, "_start_semantic_build"):
+            # 空查询 → 最近搜索（空列表也安全）
+            self.win._on_global_search_query("")
+            # 查询"兽装"（类别匹配：应命中兽装角色组；无库数据时跳过）
+            self.win._on_global_search_query("兽装")
+            settle(self.app, 4)
+            if self.win._global_search._items:
+                self.assertGreater(len(self.win._global_search._items), 0)
+            else:
+                self.skipTest("库中无兽装角色组")
+            # 无结果查询 → 无真实结果 + 面板有提示（不空白）；
+            # 语义分区可能给出「模型加载中」或近邻结果，故只要求有可读提示
+            self.win._on_global_search_query("__no_such_thing__")
+            settle(self.app, 4)
         non_semantic = [i for i in self.win._global_search._items
                         if i.get("badge") != "语义"]
         self.assertEqual(non_semantic, [], "不应有非语义的真实结果")
         texts = [l.text() for l in self.win._global_search.findChildren(QLabel)]
         self.assertTrue(
-            any(("没有找到" in t) or ("语义索引构建中" in t) for t in texts),
-            "应有无结果/索引构建提示")
+            any(("没有找到" in t) or ("语义" in t) for t in texts),
+            "应有无结果提示或语义分区提示")
         # 无 payload 的结果：仅记录最近搜索，不跳转不崩溃
         self.win._on_global_result_selected(
             {"title": "测试条目", "payload": {}})
@@ -173,16 +176,48 @@ class GlobalSearchWindowTests(unittest.TestCase):
         texts = [l.text() for l in self.win._global_search.findChildren(QLabel)]
         self.assertTrue(any("语义索引构建中" in t for t in texts))
 
-        # 情形2：索引就绪 → 语义结果行
-        with mock.patch("core.visual_search.get_index", return_value=_FakeIndex(2)):
+        # 情形2：索引就绪 + 模型已加载 → 直接给语义结果行
+        with mock.patch("core.visual_search.get_index", return_value=_FakeIndex(2)), \
+                mock.patch("core.visual_search.get_encoder",
+                           return_value=_FakeLoadedEncoder()):
             self.win._on_global_search_query("白狼")
         settle(self.app, 4)
         items = self.win._global_search._items
         sem = [i for i in items if i.get("badge") == "语义"]
         self.assertEqual(len(sem), 2)
         self.assertIn("photo", sem[0]["payload"]["kind"] or "")
+
+        # 情形3：索引就绪但模型未加载 → 后台预热（不阻塞主线程），先给提示行
+        with mock.patch("core.visual_search.get_index", return_value=_FakeIndex(2)), \
+                mock.patch("core.visual_search.get_encoder",
+                           return_value=_FakeColdEncoder()), \
+                mock.patch.object(self.win, "_start_semantic_build") as warm:
+            self.win._on_global_search_query("白狼")
+        settle(self.app, 4)
+        self.assertTrue(warm.called, "应后台预热模型，而不是在主线程加载")
+        texts = [l.text() for l in self.win._global_search.findChildren(QLabel)]
+        self.assertTrue(any("语义模型加载中" in t for t in texts))
+        sem = [i for i in self.win._global_search._items
+               if i.get("badge") == "语义"]
+        self.assertEqual(len(sem), 1)
+        self.assertEqual(sem[0]["payload"]["kind"], "hint")
+
         self.win._global_search.hide_panel()
         settle(self.app, 10)
+
+
+class _FakeLoadedEncoder:
+    """已加载的编码器桩：语义分区走「直接检索」分支。"""
+
+    def is_loaded(self):
+        return True
+
+
+class _FakeColdEncoder:
+    """未加载的编码器桩：语义分区应转后台预热。"""
+
+    def is_loaded(self):
+        return False
 
 
 class _FakeIndex:

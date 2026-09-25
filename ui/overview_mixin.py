@@ -470,14 +470,21 @@ class _OverviewMixinMixin:
         state["current_members"] = members
         state["current_det_map"] = det_map
 
+        # 合照多角色：这些照片各自属于多少个角色组（只读，失败按单角色显示）
+        member_paths = [p for p, _ in members]
+        group_counts = self._image_group_counts(member_paths) if members else {}
+        multi_count = sum(
+            1 for p in member_paths if int(group_counts.get(p) or 1) > 1)
+
         state["wall_title"].setText(f"🐾  {display_name}")
         category_text = self._format_group_category(group)
+        extra = f" · 合照 {multi_count} 张" if multi_count else ""
         if category_text:
             state["wall_count"].setText(
-                f"{category_text} · {len(members)} 张照片"
+                f"{category_text} · {len(members)} 张照片{extra}"
             )
         else:
-            state["wall_count"].setText(f"{len(members)} 张照片")
+            state["wall_count"].setText(f"{len(members)} 张照片{extra}")
 
         self._clear_grid(state["wall_grid_layout"])
         for tile in list(self._tile_path_map.keys()):
@@ -486,7 +493,9 @@ class _OverviewMixinMixin:
 
         cols = 6
         for idx, (path, det_idx) in enumerate(members):
-            tile = self._render_photo_tile(path, det_idx, det_map.get((path, det_idx)), page_key, group)
+            tile = self._render_photo_tile(
+                path, det_idx, det_map.get((path, det_idx)), page_key, group,
+                int(group_counts.get(path) or 1))
             r, c = divmod(idx, cols)
             state["wall_grid_layout"].addWidget(tile, r, c)
 
@@ -494,10 +503,69 @@ class _OverviewMixinMixin:
         self._refresh_ai_picks(page_key)
 
 
-    def _render_photo_tile(self, path, det_idx, det_info, page_key, group):
-        """渲染单张主体缩略图并显示 detection 编号。
+    def _image_group_counts(self, paths):
+        """只读：这些照片各自属于多少个角色组（合照多角色可见化）。
 
-        显示该 detection 的 bbox 裁剪；bbox 无效回退完整原图。
+        任何失败都返回空 dict（UI 退化为按单角色显示，不影响照片墙）。
+        """
+        if not paths:
+            return {}
+        try:
+            from core.identity import get_reader
+            return get_reader().db.count_groups_by_image(list(paths)) or {}
+        except Exception as e:
+            print(f"[角色详情] 合照角色数统计失败（忽略）: {e}")
+            return {}
+
+    def _pixmap_for_wall_tile(self, path, target_size=None, label=None):
+        """详情页照片墙缩略图：完整原图（不裁 bbox）。
+
+        目标约定：角色卡片封面用 detection 裁剪区分角色，**详情页显示完整
+        原图**，合照在多个角色页重复出现。整图缩略图与 bbox 无关 → 同一张
+        合照在多个角色页共享同一份磁盘缩略图缓存（比每角色一份裁剪图更省）。
+        """
+        local = self._resolve_display_path(path)
+        cache = getattr(self, "_thumb_cache", None)
+        if local and cache is not None and cache.enabled:
+            try:
+                cp = cache.get_cached(local, 256, None)
+                if cp:
+                    pix = QPixmap(cp)
+                    if not pix.isNull():
+                        return pix
+                if label is not None:
+                    cache.request(
+                        local, 256, None,
+                        on_ready=lambda cpath, lab=label:
+                        self._on_wall_thumb_ready(lab, cpath))
+            except Exception as e:
+                print(f"[照片墙] 整图缩略图缓存异常 {path}: {e}")
+        pix, _ = self._load_pixmap_cached(path, target_size)
+        return pix
+
+    @staticmethod
+    def _on_wall_thumb_ready(label, cache_path):
+        """后台整图缩略图就绪 → 主线程替换瓦片图（失败/已销毁静默忽略）。"""
+        if not cache_path or label is None:
+            return
+        try:
+            if label.parent() is None:
+                return
+            pix = QPixmap(cache_path)
+            if pix.isNull():
+                return
+            label.setPixmap(pix.scaled(
+                110, 110, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+        except Exception:
+            pass
+
+    def _render_photo_tile(self, path, det_idx, det_info, page_key, group,
+                           group_count=1):
+        """渲染「完整原图」缩略图并显示 detection 编号。
+
+        约定（2026-08-22 目标线程）：卡片封面用 detection 裁剪区分角色，
+        但**详情页显示该角色出现过的完整原图**，合照在多个角色页重复出现；
+        因此瓦片不再裁 bbox，仅在角标上标明这张合照同时属于几个角色。
         """
         tile = QFrame()
         tile.setFixedSize(124, 140)
@@ -515,7 +583,10 @@ class _OverviewMixinMixin:
             }
         """ % (_ga, _tr))
         tile.setCursor(Qt.PointingHandCursor)
-        tile.setToolTip(f"detection #{det_idx}")
+        tile.setToolTip(
+            f"detection #{det_idx}"
+            + (f"｜这张合照同时属于 {int(group_count or 1)} 个角色"
+               if int(group_count or 1) > 1 else ""))
         tile_layout = QVBoxLayout(tile)
         tile_layout.setContentsMargins(5, 4, 5, 4)
         tile_layout.setSpacing(2)
@@ -525,7 +596,7 @@ class _OverviewMixinMixin:
         image_label.setAlignment(Qt.AlignCenter)
         image_label.setStyleSheet("background:transparent;border:none;")
         image_label.setCursor(Qt.PointingHandCursor)
-        pix = self._pixmap_for_detection(path, det_info, image_label.size())
+        pix = self._pixmap_for_wall_tile(path, image_label.size(), image_label)
         if not pix.isNull():
             image_label.setPixmap(
                 pix.scaled(110, 110, Qt.KeepAspectRatio, Qt.SmoothTransformation)
@@ -536,6 +607,17 @@ class _OverviewMixinMixin:
                 "background:transparent;border:none;color:#b9c4d2;font-size:10px;"
             )
 
+        n_roles = int(group_count or 1)
+        if n_roles > 1:
+            badge = QLabel(f"合照 ×{n_roles}", image_label)
+            badge.setStyleSheet(
+                "background:rgba(120,160,255,0.88);color:white;"
+                "border-radius:8px;padding:1px 6px;font-size:9px;"
+                "font-weight:700;")
+            badge.adjustSize()
+            badge.move(max(0, image_label.width() - badge.width() - 4), 4)
+            badge.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            badge.show()
         caption = QLabel(f"detection #{det_idx}")
         caption.setFixedHeight(15)
         caption.setAlignment(Qt.AlignCenter)

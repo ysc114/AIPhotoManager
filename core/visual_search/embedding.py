@@ -23,6 +23,25 @@ DEFAULT_MODEL_NAME = os.environ.get("VISUAL_SEARCH_MODEL", "ViT-L-14")
 DEFAULT_PRETRAINED = os.environ.get(
     "VISUAL_SEARCH_PRETRAINED", "datacomp_xl_s13b_b90k")
 
+
+def _prefer_offline_mode():
+    """离线优先：权重已本地缓存，避免每次加载都向 HF 发 HEAD 请求。
+
+    网络受限环境（本机）下在线检查会重试 15s+ 才回落本地缓存；
+    需要联网下载新模型时设置 VISUAL_SEARCH_ALLOW_DOWNLOAD=1。
+    """
+    if os.environ.get("VISUAL_SEARCH_ALLOW_DOWNLOAD"):
+        return
+    os.environ.setdefault("HF_HUB_OFFLINE", "1")
+    try:
+        import huggingface_hub.constants as hf_const
+        hf_const.HF_HUB_OFFLINE = True   # 兼容「hf 已先于本模块导入」的情况
+    except Exception:
+        pass
+
+
+_prefer_offline_mode()
+
 # 支持的后端设备
 ALLOWED_DEVICES = ("cpu", "cuda")
 
