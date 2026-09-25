@@ -711,6 +711,22 @@ class SettingsCenterPage(QWidget):
             "data.auto_update_visual_index", on_change=self.refresh_index_status),
             note="分析/扫描新照片完成后，后台增量补齐搜索索引")
 
+        # 🩺 数据体检（纯只读，不加载模型）
+        self._subtitle(body, "🩺 数据体检")
+        self._health_label = QLabel("点击「运行体检」查看库 / 照片 / 缓存健康状况。")
+        self._health_label.setStyleSheet(
+            "font-size:12px;color:#4a5a6a;background:rgba(255,255,255,0.5);"
+            "border:1px solid rgba(255,255,255,0.6);border-radius:10px;"
+            "padding:10px 12px;")
+        self._health_label.setWordWrap(True)
+        body.addWidget(self._health_label)
+        health_row = QHBoxLayout()
+        health_row.setSpacing(10)
+        health_row.addWidget(self._glass_btn(
+            "🩺 运行体检", ("#6fb7f5", "#9b8cf0"), self._run_health_check))
+        health_row.addStretch(1)
+        body.addLayout(health_row)
+
         tip = QLabel("不提供「重新聚类全部照片」。全量重聚会拆散人工合并结果，请使用「AI 找候选 → 人工确认 → 合并」流程。")
         tip.setStyleSheet("font-size:11px;color:#a0aab8;background:transparent;border:none;")
         tip.setWordWrap(True)
@@ -1161,6 +1177,30 @@ class SettingsCenterPage(QWidget):
                 self.win._switch_page(6)
         else:
             self._backup_status.setText("无法触发扫描（主窗口未就绪）。")
+
+    def _run_health_check(self):
+        """运行数据体检（纯只读；实测全库约 0.3s，不加载 AI 模型）。"""
+        label = getattr(self, "_health_label", None)
+        if label is None:
+            return
+        try:
+            from PySide6.QtGui import QGuiApplication
+            QGuiApplication.setOverrideCursor(Qt.WaitCursor)
+        except Exception:
+            pass
+        try:
+            from core.health_check import format_report, run_health_check
+            result = run_health_check()
+            label.setText(format_report(result))
+            self._health_result = result
+        except Exception as e:
+            label.setText(f"❌ 体检失败：{e}")
+        finally:
+            try:
+                from PySide6.QtGui import QGuiApplication
+                QGuiApplication.restoreOverrideCursor()
+            except Exception:
+                pass
 
     def _clean_cache(self):
         """清理失效缓存：文件已删除的分析缓存条目 + 视觉指纹记录。
