@@ -174,6 +174,18 @@ class IdentityDatabase:
         cols = ["id", "name", "type", "description", "cover_image", "created_at", "updated_at"]
         return self._row_to_dict(row, cols)
 
+    def get_group_serials(self):
+        """角色组稳定序号（同类型内 created_at DESC, id DESC → 1 起）。
+
+        仅用于未命名角色的可读显示名（只读；不写库、不动 schema）。
+        """
+        rows = self.conn.execute(
+            """SELECT id, ROW_NUMBER() OVER (
+                   PARTITION BY type ORDER BY created_at DESC, id DESC
+               ) AS serial FROM identity_group"""
+        ).fetchall()
+        return {r[0]: int(r[1]) for r in rows}
+
     def get_all_groups(self, group_type=None):
         if group_type:
             rows = self.conn.execute(
@@ -415,7 +427,13 @@ class IdentityDatabase:
                       i.detection_index, i.bbox, i.confidence, i.embedding_type,
                       (SELECT COUNT(DISTINCT i2.image_path)
                          FROM identity_image AS i2
-                        WHERE i2.group_id = i.group_id) AS photos
+                        WHERE i2.group_id = i.group_id) AS photos,
+                      (SELECT s.serial FROM (
+                           SELECT id, ROW_NUMBER() OVER (
+                               PARTITION BY type
+                               ORDER BY created_at DESC, id DESC) AS serial
+                           FROM identity_group) AS s
+                       WHERE s.id = i.group_id) AS serial
                FROM identity_image AS i
                LEFT JOIN identity_group AS g ON g.id = i.group_id
                WHERE i.image_path = ? AND i.group_id <> ''
@@ -426,7 +444,8 @@ class IdentityDatabase:
             {"character_id": r[0] or "", "name": r[1] or "",
              "type": r[2] or "", "detection_index": int(r[3] or 0),
              "bbox": r[4] or "", "confidence": float(r[5] or 0.0),
-             "embedding_type": r[6] or "", "photos": int(r[7] or 0)}
+             "embedding_type": r[6] or "", "photos": int(r[7] or 0),
+             "serial": int(r[8] or 0)}
             for r in rows
         ]
 

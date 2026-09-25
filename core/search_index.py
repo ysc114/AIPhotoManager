@@ -19,6 +19,7 @@ import os
 import re
 import datetime
 from pathlib import Path
+from core.identity.naming import display_name as role_display_name
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
@@ -107,7 +108,7 @@ class SearchIndex:
             name = str(g.get("name") or "")
             cid = str(g.get("character_id") or "")
             gtype = str(g.get("type") or "")
-            label = name if name else f"角色 {str(cid)[:10]}"
+            label = role_display_name(name, gtype, g.get("serial"))
             for det in (g.get("detections") or []):
                 img = det.get("image_path")
                 if not img:
@@ -145,7 +146,9 @@ class SearchIndex:
             name = str(g.get("name") or "")
             cid = str(g.get("character_id") or "")
             kws = _TYPE_KEYWORDS.get(gtype, ())
-            haystack = (name + " " + cid + " " + " ".join(kws)).lower()
+            label = role_display_name(name, gtype, g.get("serial"))
+            haystack = (name + " " + label + " " + cid + " "
+                        + " ".join(kws)).lower()
             if (not q) or q in haystack or q in name.lower() or q in cid.lower():
                 roles.append(g)
 

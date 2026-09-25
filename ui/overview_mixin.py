@@ -13,6 +13,7 @@ from PySide6.QtGui import QPixmap, QColor, QIcon
 from PySide6.QtWidgets import QLabel, QWidget, QFrame, QPushButton, QGridLayout, QVBoxLayout, QHBoxLayout, QMessageBox, QMenu, QListWidget, QListWidgetItem, QInputDialog, QDialog, QDialogButtonBox, QAbstractItemView, QGraphicsOpacityEffect, QGraphicsDropShadowEffect
 
 from config.settings_manager import settings as S
+from core.identity.naming import display_name as role_display_name
 
 
 class _OverviewMixinMixin:
@@ -402,7 +403,8 @@ class _OverviewMixinMixin:
         if not self._group_page_loaded.get(page_key, False):
             self._load_groups_into_page(page_key)
             self._group_page_loaded[page_key] = True
-        display_name = group.get("name") or f"角色 {str(group.get('character_id') or '')[:10]}"
+        display_name = role_display_name(
+            group.get("name"), group.get("type"), group.get("serial"))
         self._switch_page(row)
         self._open_group(page_key, group, display_name)
 
@@ -604,7 +606,8 @@ class _OverviewMixinMixin:
         menu.addSeparator()
         for ref in refs[:40]:
             cid = str(ref.get("character_id") or "")
-            label = ref.get("name") or f"角色 {cid[:10]}"
+            label = role_display_name(
+                ref.get("name"), ref.get("type"), ref.get("serial"))
             n_photos = int(ref.get("photos") or 0)
             suffix = f" · {n_photos} 张照片" if n_photos else ""
             act = menu.addAction(f"🎭 {label}{suffix}")

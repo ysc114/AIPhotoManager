@@ -245,6 +245,7 @@ class IdentityManager:
         """
         db_filter = None if group_type == "all" else group_type
         groups = self.db.get_all_groups(group_type=db_filter)
+        serials = self.db.get_group_serials()
         result = []
         for group in groups:
             if group is None:
@@ -289,6 +290,7 @@ class IdentityManager:
                 "character_id": group.get("id", ""),
                 "name": group.get("name", ""),
                 "type": group.get("type", ""),
+                "serial": int(serials.get(group.get("id"), 0)),
                 "description": group.get("description", ""),
                 "images": image_paths,
                 "detections": detections,

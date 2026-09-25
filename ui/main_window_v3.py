@@ -9,6 +9,7 @@ if str(_project_root) not in sys.path:
     sys.path.insert(0, str(_project_root))
 
 from config.settings_manager import settings as S
+from core.identity.naming import display_name as role_display_name
 from ui.settings_center import SettingsCenterPage
 
 
@@ -1473,7 +1474,8 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
                     "👤" if st == ["face"] else "🎭")
             char_items.append({
                 "icon": icon,
-                "title": g.get("name") or f"角色 {str(g.get('character_id') or '')[:8]}",
+                "title": role_display_name(
+                    g.get("name"), g.get("type"), g.get("serial")),
                 "subtitle": self._format_group_category(g),
                 "badge": "角色",
                 "payload": {"kind": "character", "group": g},

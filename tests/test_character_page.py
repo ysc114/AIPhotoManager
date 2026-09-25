@@ -6,12 +6,14 @@
 import os
 import tempfile
 import shutil
+import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication
+from PySide6.QtWidgets import QApplication, QLabel
 
 from ui.main_window_v3 import MainWindow
 from core.identity.manager import IdentityManager
@@ -243,6 +245,49 @@ class CharacterPageTests(unittest.TestCase):
         groups = self.mgr.get_groups(group_type="all")
         cids = [g["character_id"] for g in groups]
         self.assertEqual(len(cids), len(set(cids)), "角色页不得重复 character_id")
+
+
+    def test_unnamed_group_display_name_uses_stable_serial(self):
+        """未命名：稳定序号优先（#007）；已命名优先用户名字。"""
+        group = fursee_group("cid-serial")
+        group["serial"] = 7
+        self.assertEqual(
+            self.window._compute_display_name(group, 1, "兽装角色"),
+            "未命名兽装角色 #007")
+        named = dict(group, name="小白")
+        self.assertEqual(
+            self.window._compute_display_name(named, 1, "兽装角色"), "小白")
+        # 无序号（旧数据/合成数据）仍退回列表序号方案
+        self.assertEqual(
+            self.window._compute_display_name(fursee_group("c2"), 3, "兽装角色"),
+            "未命名兽装角色 #003")
+
+    def test_card_title_shows_stable_serial(self):
+        """卡片标题不再出现 UUID 前缀，改用「未命名兽装角色 #007」。"""
+        group = fursee_group("cid-uuid-abcdef")
+        group["serial"] = 7
+
+        class _StubMgr:
+            def get_groups(self, group_type=None):
+                return [group]
+
+            def close(self):
+                pass
+
+        state = self.window._group_pages["fursuit"]
+        with mock.patch("core.identity.get_reader", return_value=_StubMgr()):
+            self.window._load_groups_into_page("fursuit")
+            deadline = time.time() + 5
+            while time.time() < deadline and state["grid_layout"].count() == 0:
+                self.app.processEvents()
+                time.sleep(0.01)
+        labels = []
+        for i in range(state["grid_layout"].count()):
+            w = state["grid_layout"].itemAt(i).widget()
+            if w is not None:
+                labels += [lab.text() for lab in w.findChildren(QLabel)]
+        self.assertTrue(any("#007" in x for x in labels), labels)
+        self.assertFalse(any("cid-uuid" in x for x in labels), labels)
 
 
 if __name__ == "__main__":

@@ -22,6 +22,7 @@ from PySide6.QtCore import QDate
 from config.settings_manager import settings as S
 from ui.components.icons import draw_icon
 from core.search_index import search_index
+from core.identity.naming import display_name as role_display_name
 from core.thumbnail_cache import thumbnail_cache
 
 
@@ -89,9 +90,8 @@ class _ResultCard(QFrame):
         text_col = QVBoxLayout()
         text_col.setSpacing(1)
         if kind == "role":
-            title = data.get("name") or "未命名角色"
-            if not data.get("name"):
-                title = f"角色 {str(data.get('character_id') or '')[:10]}"
+            title = role_display_name(
+                data.get("name"), data.get("type"), data.get("serial"))
             sub = "兽装" if data.get("type") == "fursuit_character" else "人物"
             cid = str(data.get("character_id") or "")[:12]
             if cid:

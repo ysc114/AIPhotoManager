@@ -13,6 +13,7 @@ from PySide6.QtGui import QPixmap, QColor, QPainter, QPen, QImageReader, QImageI
 from PySide6.QtWidgets import QLabel, QWidget, QFrame, QPushButton, QGridLayout, QVBoxLayout, QHBoxLayout, QMessageBox, QScrollArea, QStackedWidget
 
 from config.settings_manager import settings as S
+from core.identity.naming import display_name as role_display_name
 from core.photo_quality.scorer import get_analyzer as get_pq_analyzer
 from ui.aurora_card import AuroraGlassCard
 from ui.components.glass_button import GlassButton
@@ -716,6 +717,10 @@ class _RoleCenterMixinMixin:
         name = (group.get("name") or "").strip()
         if name:
             return name
+        serial = group.get("serial")
+        if serial:
+            # 稳定序号（库内排序）优先；无序号时退回列表序号
+            return role_display_name(None, group.get("type"), serial)
         return f"未命名{default_prefix} #{idx:03d}"
 
 
@@ -1023,8 +1028,8 @@ class _RoleCenterMixinMixin:
         cols = max(3, self.width() // (226 + 14))
         items = []
         for i, group in enumerate(groups):
-            display_name = (group.get("name") or
-                            f"{state['default_prefix']} {str(group.get('character_id') or '')[:10]}")
+            display_name = role_display_name(
+                group.get("name"), group.get("type"), group.get("serial"))
             items.append((i, group, display_name))
         token = object()
         self._group_page_pending["character"] = {

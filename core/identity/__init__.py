@@ -11,5 +11,6 @@
 
 # 公开 API 再导出（包内无引用，但外部大量 `from core.identity import ...`）
 from core.identity.manager import IdentityManager, get_reader  # noqa: F401
+from core.identity.naming import display_name, type_label  # noqa: F401
 
-__all__ = ["IdentityManager", "get_reader"]
+__all__ = ["IdentityManager", "get_reader", "display_name", "type_label"]
