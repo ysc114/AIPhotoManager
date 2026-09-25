@@ -257,6 +257,7 @@ class _OverviewMixinMixin:
                 elif "普通人物" in l1_cn:
                     person_photos += 1
 
+            # 注意：analyzed 先按缓存条目计数，稍后若库可读会用库内照片数覆盖
             stats["analyzed"] = analyzed
             stats["fursuit_photos"] = fursuit_photos
             stats["person_photos"] = person_photos
@@ -266,6 +267,17 @@ class _OverviewMixinMixin:
             )
         except Exception as e:
             print(f"[总览] 缓存读取失败（不影响其余统计）: {e}")
+
+        # ---- 库内照片数（与设置页/体检口径一致）----
+        # 缓存条目 ≠ 库内照片（历史缓存可能包含已删除/未入库的照片），
+        # 「AI 已分析」以数据库为准；缓存只用于 L1 类别与平均置信度。
+        try:
+            from core.identity import get_reader
+            stats["analyzed"] = int(get_reader().db.conn.execute(
+                "SELECT COUNT(DISTINCT image_path) FROM identity_image"
+            ).fetchone()[0] or 0)
+        except Exception as e:
+            print(f"[总览] 库内照片统计失败（回退缓存计数）: {e}")
 
         # ---- IdentityManager（角色分组统计，只读）----
         # IdentityManager() 构造懒加载模型；get_groups() 纯 SELECT，
