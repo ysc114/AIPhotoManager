@@ -44,6 +44,27 @@ def _md5(p, chunk=1 << 20):
     return h.hexdigest()
 
 
+_MD5_CACHE = {}          # path -> (mtime_ns, size, md5)
+
+
+def cached_md5(p, chunk=1 << 20):
+    """带 (mtime_ns, size) 失效的内存缓存 MD5。
+
+    用于同一进程内反复统计（待处理页/设置页）时避免重复读盘；
+    文件被修改/替换后 mtime 或 size 变化 → 自动重算。
+    """
+    try:
+        st = os.stat(p)
+    except OSError:
+        return _md5(p, chunk)
+    rec = _MD5_CACHE.get(p)
+    if rec and rec[0] == st.st_mtime_ns and rec[1] == st.st_size:
+        return rec[2]
+    m = _md5(p, chunk)
+    _MD5_CACHE[p] = (st.st_mtime_ns, st.st_size, m)
+    return m
+
+
 class DuplicateScanner:
     """只读扫描：按 MD5 找出完全相同的照片组。"""
 

@@ -1158,8 +1158,9 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
 
         只读统计（path + MD5），不触发分析；用于待处理页展示。
         """
-        from core.identity import IdentityManager
-        mgr = IdentityManager()
+        from core.identity import get_reader
+        from core.duplicates import cached_md5
+        mgr = get_reader()   # 共享只读连接：避免每次刷新都新建连接 + WAL checkpoint
         try:
             photos_dir = os.path.abspath(
                 os.path.join(os.path.dirname(__file__), "..", "photos")
@@ -1169,16 +1170,8 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
                     "SELECT DISTINCT image_path FROM identity_image"
                 )
             }
-            known_md5 = set()
-            import hashlib
-            for p in existing:
-                if os.path.exists(p):
-                    try:
-                        with open(p, "rb") as fh:
-                            known_md5.add(hashlib.md5(fh.read()).hexdigest())
-                    except OSError:
-                        pass
-            total = new_cnt = dup_cnt = 0
+            total = 0
+            candidates = []
             if os.path.isdir(photos_dir):
                 exts = {".jpg", ".jpeg", ".png", ".webp"}
                 for n in sorted(os.listdir(photos_dir)):
@@ -1186,16 +1179,44 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
                         continue
                     total += 1
                     p = os.path.join(photos_dir, n).replace("\\", "/")
-                    if p in existing:
-                        continue
+                    if p not in existing:
+                        candidates.append(p)
+            # 两级过滤（2026-09-25）：先按文件大小筛（只 stat 不读盘），
+            # 只有大小相同的才可能内容重复，再对这几组算 MD5。
+            # 此前无条件为全库照片算 MD5 → 待处理页冷启动 ~3s 纯 I/O。
+            size_map = {}
+            for p in existing:
+                try:
+                    size_map.setdefault(os.stat(p).st_size, []).append(p)
+                except OSError:
+                    continue
+            new_cnt = dup_cnt = 0
+            for p in candidates:
+                try:
+                    st = os.stat(p)
+                except OSError:
+                    new_cnt += 1
+                    continue
+                peers = size_map.get(st.st_size) or []
+                if not peers:
+                    new_cnt += 1        # 大小唯一 → 不可能与库内重复
+                    continue
+                try:
+                    m = cached_md5(p)
+                except OSError:
+                    new_cnt += 1
+                    continue
+                dup = False
+                for q in peers:
                     try:
-                        with open(p, "rb") as fh:
-                            m = hashlib.md5(fh.read()).hexdigest()
-                        if m in known_md5:
-                            dup_cnt += 1
-                            continue
+                        if cached_md5(q) == m:
+                            dup = True
+                            break
                     except OSError:
-                        pass
+                        continue
+                if dup:
+                    dup_cnt += 1
+                else:
                     new_cnt += 1
         finally:
             mgr.close()

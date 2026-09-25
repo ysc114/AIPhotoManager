@@ -16,7 +16,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PySide6.QtWidgets import QApplication, QMessageBox
-from core.duplicates import norm_path
+from core.duplicates import cached_md5, norm_path
 from config.settings_manager import settings as S
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -261,6 +261,33 @@ class MainWindowIntegrationTests(unittest.TestCase):
         self.assertFalse(self.win._group_page_loaded["fursuit"])
         self.assertFalse(self.win._group_page_loaded["person"])
         self.assertFalse(self.win._group_page_loaded["character"])
+
+
+class CachedMd5Tests(unittest.TestCase):
+    """共享 MD5 缓存：命中不重算、文件变化自动失效（待处理/设置页统计用）。"""
+
+    def test_cache_hit_and_invalidation(self):
+        import hashlib
+        from unittest import mock
+        tmp = tempfile.mkdtemp()
+        try:
+            p = os.path.join(tmp, "sample.bin")
+            with open(p, "wb") as fh:
+                fh.write(b"hello")
+            m1 = cached_md5(p)
+            self.assertEqual(m1, hashlib.md5(b"hello").hexdigest())
+            with mock.patch("core.duplicates._md5") as inner:
+                self.assertEqual(cached_md5(p), m1)
+                self.assertFalse(inner.called, "未变更文件应命中缓存不读盘")
+            time.sleep(0.01)
+            with open(p, "wb") as fh:
+                fh.write(b"world!!")
+            os.utime(p, None)
+            m2 = cached_md5(p)
+            self.assertEqual(m2, hashlib.md5(b"world!!").hexdigest())
+            self.assertNotEqual(m1, m2, "文件变更后缓存应失效")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 
 
 if __name__ == "__main__":
