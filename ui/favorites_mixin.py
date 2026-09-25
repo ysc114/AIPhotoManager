@@ -6,7 +6,7 @@ favorites_mixin —— MainWindow 页面方法拆分（纯移动，方法体零�
 
 import os
 
-from PySide6.QtCore import Qt, QSize
+from PySide6.QtCore import Qt
 from PySide6.QtGui import QPixmap, QIcon
 from PySide6.QtWidgets import (
     QLabel, QWidget, QFrame, QPushButton, QGridLayout, QVBoxLayout,
@@ -118,17 +118,27 @@ class _FavoritesMixinMixin:
         label.setAlignment(Qt.AlignCenter)
         label.setFixedSize(138, 138)
         label.setStyleSheet("background:transparent;border:none;")
-        resolved = self._resolve_display_path(path)
-        pix = self._load_pixmap_cached(resolved, QSize(138, 138))[0]
+        # 缓存优先 + 后台补图：此前逐张同步解码原图（50 张实测 2.2s 主线程卡顿）
+        def _apply(cache_path, lab=label, px=138):
+            if not cache_path:
+                return
+            try:
+                from PySide6.QtGui import QPixmap
+                pix = QPixmap(cache_path)
+                if pix.isNull():
+                    return
+                lab.setPixmap(pix.scaled(
+                    px, px, Qt.KeepAspectRatio, Qt.SmoothTransformation))
+            except Exception:
+                pass          # 页面已重建 → 旧 label 失效，忽略
+
+        pix = self._thumb_cache_pixmap(path, 138, on_ready=_apply)
         if not pix.isNull():
             label.setPixmap(
                 pix.scaled(138, 138, Qt.KeepAspectRatio, Qt.SmoothTransformation)
             )
         else:
-            label.setText("无图")
-            label.setStyleSheet(
-                "background:transparent;border:none;color:#bdc3c7;font-size:10px;"
-            )
+            label.setText("…")
         tile_layout.addWidget(label)
 
         for widget in (tile, label):

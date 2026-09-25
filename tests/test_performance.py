@@ -30,6 +30,7 @@ LIMIT_STARTUP_INTERACTIVE = 2.5  # 构造 + show + 首帧
 LIMIT_SEARCH_INDEX = 0.3        # 搜索索引构建
 LIMIT_MD5_SCAN = 0.5            # 全库 MD5 扫描
 LIMIT_PHOTO_LIST = 1.0          # 照片列表填充（磁盘缩略图缓存优先）
+LIMIT_FAVORITE_TILES = 1.0      # 收藏页 50 张瓦片渲染（缓存优先）
 
 
 def settle(app, frames=8, dt=0.02):
@@ -123,6 +124,32 @@ class PerformanceGuardTests(unittest.TestCase):
             elapsed, LIMIT_PHOTO_LIST,
             f"照片列表填充 {elapsed:.2f}s 超限（{LIMIT_PHOTO_LIST}s）"
             "——疑似退回逐行同步解码原图")
+
+
+    def test_favorite_tiles_render_within_budget(self):
+        """收藏页 50 张瓦片渲染 ≤ 1.0s（改前逐张同步解码：2.2s）。"""
+        from ui.main_window_v3 import MainWindow
+        win = MainWindow()
+        win._ui_ready = True
+        win.show()
+        settle(self.app, 4)
+        photos_dir = os.path.join(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__))), "photos")
+        exts = (".jpg", ".jpeg", ".png", ".webp")
+        files = [os.path.join(photos_dir, n)
+                 for n in sorted(os.listdir(photos_dir))
+                 if os.path.splitext(n)[1].lower() in exts][:50]
+        self.assertTrue(files, "photos/ 为空，无法测试收藏瓦片")
+        win._pixmap_cache.clear()
+        t0 = time.perf_counter()
+        for p in files:
+            win._render_favorite_tile(p)
+        elapsed = time.perf_counter() - t0
+        win.close()
+        self.assertLess(
+            elapsed, LIMIT_FAVORITE_TILES,
+            f"收藏瓦片 {elapsed:.2f}s 超限（{LIMIT_FAVORITE_TILES}s）"
+            "——疑似退回逐张同步解码原图")
 
 
 if __name__ == "__main__":

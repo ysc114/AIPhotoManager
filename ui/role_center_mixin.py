@@ -642,6 +642,32 @@ class _RoleCenterMixinMixin:
         return pix
 
 
+    def _thumb_cache_pixmap(self, path, size, bbox=None, on_ready=None):
+        """缩略图缓存优先取图；未命中投递后台生成（回调在主线程）。
+
+        返回命中时的 QPixmap（未命中返回空 QPixmap）。调用方拿不到图时可先占位，
+        on_ready(cache_path) 触发后再回填——避免主线程逐张解码原图。
+        """
+        from PySide6.QtGui import QPixmap
+        from core.thumbnail_cache import thumbnail_cache
+        local = self._resolve_display_path(path)
+        if not local:
+            return QPixmap()
+        try:
+            cp = thumbnail_cache.get_cached(local, size, bbox)
+        except Exception:
+            cp = None
+        if cp:
+            pix = QPixmap(cp)
+            if not pix.isNull():
+                return pix
+        if on_ready is not None:
+            try:
+                thumbnail_cache.request(local, size, bbox, on_ready)
+            except Exception:
+                pass
+        return QPixmap()
+
     def _pixmap_for_full_preview(self, path, bbox=None, detection_index=None):
         """加载完整原图并在预览尺寸上叠加当前 detection 的 bbox。"""
         pix, original_size = self._load_pixmap_cached(

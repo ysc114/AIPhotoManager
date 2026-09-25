@@ -1761,27 +1761,9 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
 
     def _set_photo_list_icon(self, item, path, size=110):
         """列表行图标：缓存命中直接显示，未命中后台生成后回填（主线程回调）。"""
-        from core.thumbnail_cache import thumbnail_cache
-        local = self._resolve_display_path(path)
-        if not local:
-            return
-        size = max(24, int(size))
-        try:
-            cp = thumbnail_cache.get_cached(local, size)
-        except Exception:
-            cp = None
-        if cp:
-            try:
-                pix = QPixmap(cp)
-                if not pix.isNull():
-                    item.setIcon(QIcon(pix.scaled(
-                        size, size, Qt.KeepAspectRatio,
-                        Qt.SmoothTransformation)))
-                    return
-            except Exception:
-                pass
+        px = max(24, int(size))
 
-        def _apply(cache_path, it=item, px=size):
+        def _apply(cache_path, it=item, w=px):
             if not cache_path:
                 return
             try:
@@ -1789,14 +1771,17 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
                 if pix.isNull():
                     return
                 it.setIcon(QIcon(pix.scaled(
-                    px, px, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
+                    w, w, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
             except Exception:
                 pass          # 列表已重建 → 旧 item 失效，忽略
 
-        try:
-            thumbnail_cache.request(local, size, None, _apply)
-        except Exception:
-            pass
+        pix = self._thumb_cache_pixmap(path, px, on_ready=_apply)
+        if not pix.isNull():
+            try:
+                item.setIcon(QIcon(pix.scaled(
+                    px, px, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
+            except Exception:
+                pass
 
     def _restore_photo_list(self):
         """退出相似搜索：恢复搜索前的照片列表与选中项。"""
