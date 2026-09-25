@@ -1670,17 +1670,39 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
     def _shutdown_background_workers(self, timeout_ms=3000):
         """停掉自己启动的后台线程（等不到就放弃，不阻断关窗）。"""
         self._ui_ready = False
-        for name in self._BG_WORKER_ATTRS:
-            worker = getattr(self, name, None)
-            if worker is None:
-                continue
+
+        def _stop(worker):
             try:
-                if worker.isRunning():
+                if worker is not None and worker.isRunning():
                     worker.requestInterruption()
                     worker.wait(int(timeout_ms))
             except Exception:
                 pass
+
+        for name in self._BG_WORKER_ATTRS:
+            worker = getattr(self, name, None)
+            if worker is None:
+                continue
+            _stop(worker)
             setattr(self, name, None)
+
+        # 角色页「AI 精选」：每个分组页各持一个 worker
+        for state in (getattr(self, "_group_pages", None) or {}).values():
+            if not isinstance(state, dict):
+                continue
+            worker = state.get("pq_worker")
+            if worker is not None:
+                _stop(worker)
+                state["pq_worker"] = None
+
+        # 子页面自持线程（重复页视觉扫描）：页面自己实现 shutdown_workers
+        page = getattr(self, "duplicates_page", None)
+        shutdown = getattr(page, "shutdown_workers", None)
+        if callable(shutdown):
+            try:
+                shutdown(timeout_ms)
+            except Exception:
+                pass
 
     def closeEvent(self, event):
         """关窗：先收尾后台线程，避免退出期原生崩溃。"""

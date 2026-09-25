@@ -265,6 +265,19 @@ class DuplicatesPage(QWidget):
         self._visual_groups = groups or []
         self._rebuild()
 
+    def shutdown_workers(self, timeout_ms=3000):
+        """关窗前停止后台视觉扫描（QThread 未结束就退出会崩）。"""
+        worker = getattr(self, "_visual_worker", None)
+        if worker is None:
+            return
+        try:
+            if worker.isRunning():
+                worker.requestInterruption()
+                worker.wait(int(timeout_ms))
+        except Exception:
+            pass
+        self._visual_worker = None
+
     def _on_visual_failed(self, err):
         reap_thread(self._visual_worker)
         self._visual_worker = None

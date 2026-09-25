@@ -258,6 +258,29 @@ class Phase3UiTests(unittest.TestCase):
         self.assertIsNone(getattr(win, "_health_worker", None),
                           "关窗后不应再启动体检线程")
 
+    def test_close_stops_page_level_workers(self):
+        """回归：重复页视觉扫描 / 角色页 AI 精选线程也要在关窗时收尾。"""
+        from PySide6.QtCore import QThread
+
+        class _Slow(QThread):
+            def run(self):
+                self.msleep(600)
+
+        win = self.window
+        visual = _Slow(win)                  # 重复页视觉扫描
+        picks = _Slow(win)                   # 角色页「AI 精选」
+        win.duplicates_page._visual_worker = visual
+        win._group_pages["fursuit"]["pq_worker"] = picks
+        visual.start()
+        picks.start()
+        self.assertTrue(visual.isRunning() and picks.isRunning())
+
+        win.close()
+        self.assertFalse(visual.isRunning(), "重复页线程应在关窗时结束")
+        self.assertFalse(picks.isRunning(), "角色页线程应在关窗时结束")
+        self.assertIsNone(win.duplicates_page._visual_worker)
+        self.assertIsNone(win._group_pages["fursuit"]["pq_worker"])
+
 
 if __name__ == "__main__":
     unittest.main()
