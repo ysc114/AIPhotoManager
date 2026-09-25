@@ -544,6 +544,26 @@ class IdentityManager:
             print(f"[IdentityManager] 合并决策记录写入失败（可忽略，"
                   f"仅影响撤销）：{e}")
 
+    def _library_md5_set(self, paths):
+        """已入库照片的内容 MD5 集合（mtime+size 缓存 + 流式读）。
+
+        之前每次都 `fh.read()` 整文件读入内存算全库 MD5：
+        图库四五百张时每次「分析新照片」都要重读一遍，
+        且同一会话内重复点击会反复读。cached_md5 按 (mtime_ns, size)
+        失效，只重算变化过的文件，内存也限在 1MB 分块。
+        """
+        from core.duplicates import cached_md5
+
+        out = set()
+        for p in paths:
+            if not os.path.exists(p):
+                continue
+            try:
+                out.add(cached_md5(p))
+            except OSError:
+                continue
+        return out
+
     def analyze_new_photos(self, photos_dir=None, progress_callback=None):
         """增量分析：扫描 photos/ 中未入库照片，Fursee 入库 + 定向聚类。
 
@@ -584,25 +604,19 @@ class IdentityManager:
         # "重复角色"。这里对未入库文件计算 MD5，与已入库图片的 MD5 比对，
         # 内容重复的副本直接跳过（不重复分析、不重复建组）。
         if new_files:
-            import hashlib
-            known_md5 = set()
-            for p in existing:
-                if os.path.exists(p):
-                    try:
-                        with open(p, "rb") as fh:
-                            known_md5.add(hashlib.md5(fh.read()).hexdigest())
-                    except OSError:
-                        pass
+            from core.duplicates import cached_md5
+
+            known_md5 = self._library_md5_set(existing)
             kept = []
             for p in new_files:
                 try:
-                    with open(p, "rb") as fh:
-                        m = hashlib.md5(fh.read()).hexdigest()
-                    if m in known_md5:
-                        continue  # 与已入库图片内容相同 → 副本，跳过
-                    kept.append(p)
+                    m = cached_md5(p)
                 except OSError:
                     kept.append(p)  # 读不到按原逻辑处理
+                    continue
+                if m in known_md5:
+                    continue  # 与已入库图片内容相同 → 副本，跳过
+                kept.append(p)
             new_files = kept
         total = len(new_files)
         failed = 0
@@ -686,16 +700,11 @@ class IdentityManager:
             )
         }
 
-        # 已入库图片的 MD5 集合（一次计算，供内容级去重）
-        import hashlib
-        known_md5 = set()
-        for p in existing:
-            if os.path.exists(p):
-                try:
-                    with open(p, "rb") as fh:
-                        known_md5.add(hashlib.md5(fh.read()).hexdigest())
-                except OSError:
-                    pass
+        from core.duplicates import cached_md5
+
+        # 已入库图片的 MD5 集合：惰性计算——候选文件全部
+        # 命中 path 时完全不读盘（之前每次都读整个图库）。
+        known_md5 = None
 
         to_process = []
         dup_path = dup_md5 = 0
@@ -705,11 +714,12 @@ class IdentityManager:
                 dup_path += 1
                 continue
             try:
-                with open(p, "rb") as fh:
-                    m = hashlib.md5(fh.read()).hexdigest()
+                m = cached_md5(p)
             except OSError:
                 to_process.append(p)  # 读不到按原逻辑处理
                 continue
+            if known_md5 is None:
+                known_md5 = self._library_md5_set(existing)
             if m in known_md5 or m in batch_md5:
                 dup_md5 += 1
                 continue

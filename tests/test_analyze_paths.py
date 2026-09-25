@@ -206,5 +206,44 @@ class AnalyzePathsTests(unittest.TestCase):
         self.assertEqual(events, [(1, 2), (2, 2)], "应逐张回调")
 
 
+    # 11. 全部 path 已入库 → 不读盘算全库 MD5（性能回归）
+    def test_no_library_md5_read_when_all_known(self):
+        p = self._write("a.jpg", self.content_a)
+        self.mgr.db.add_image(
+            group_id="g1", image_path=p, detection_index=0,
+            embedding_type="fursuit_fursee", confidence=0.9,
+        )
+        self._patch(route_map={p: fake_l1("fursuit")})
+        calls = []
+        with mock.patch("core.duplicates.cached_md5",
+                        side_effect=lambda q: calls.append(q) or "0" * 32):
+            r = self.mgr.analyze_paths([p])
+        self.assertEqual(r["dup_path"], 1)
+        self.assertEqual(calls, [], "全部已入库时不得再读盘算 MD5")
+
+    # 12. 内容去重走 cached_md5（流式 + mtime 缓存）
+    def test_md5_dedup_uses_cached_helper(self):
+        p_old = self._write("old.jpg", self.content_a)
+        p_new = self._write("old(1).jpg", self.content_a)
+        self.mgr.db.add_image(
+            group_id="g1", image_path=p_old, detection_index=0,
+            embedding_type="fursuit_fursee", confidence=0.9,
+        )
+        self._patch(route_map={p_new: fake_l1("fursuit")})
+        import core.duplicates as dup_mod
+
+        real = dup_mod.cached_md5
+        seen = []
+
+        def spy(q):
+            seen.append(q)
+            return real(q)
+
+        with mock.patch("core.duplicates.cached_md5", side_effect=spy):
+            r = self.mgr.analyze_paths([p_new])
+        self.assertEqual(r["dup_md5"], 1)
+        self.assertIn(p_old, seen, "已入库图片应走 cached_md5")
+        self.assertIn(p_new, seen, "候选文件应走 cached_md5")
+
 if __name__ == "__main__":
     unittest.main()
