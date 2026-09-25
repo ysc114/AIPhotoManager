@@ -223,5 +223,47 @@ class ScanNewPhotosTests(unittest.TestCase):
             w.close()
 
 
+    def test_multi_detection_commits_all_rows(self):
+        """多 detection 走同一事务：成功后两行都在。"""
+        p = self._write("multi.jpg")
+        self._patch_l1({p: "fursuit"})
+        self._patch_fursee([
+            {"bbox": [1, 1, 50, 50], "confidence": 0.9, "embedding": make_emb(0.5)},
+            {"bbox": [60, 60, 100, 100], "confidence": 0.8, "embedding": make_emb(0.6)},
+        ])
+        self.mgr._process_fursuit_fursee(p, p, {"label_cn": "兽装"})
+        rows = self.mgr.db.conn.execute(
+            "SELECT detection_index FROM identity_image WHERE image_path = ? "
+            "ORDER BY detection_index", (p,)
+        ).fetchall()
+        self.assertEqual([r[0] for r in rows], [0, 1], "两个 detection 都应落库")
+
+    def test_multi_detection_rolls_back_on_failure(self):
+        """多 detection 中途失败 → 整张回滚（不留半张照片，下次可补录）。"""
+        p = self._write("multi_fail.jpg")
+        self._patch_l1({p: "fursuit"})
+        self._patch_fursee([
+            {"bbox": [1, 1, 50, 50], "confidence": 0.9, "embedding": make_emb(0.5)},
+            {"bbox": [60, 60, 100, 100], "confidence": 0.8, "embedding": make_emb(0.6)},
+        ])
+        real_add = self.mgr.db.add_image
+
+        def flaky(*args, **kwargs):
+            if kwargs.get("detection_index") == 1:
+                raise RuntimeError("模拟第二行写入失败")
+            return real_add(*args, **kwargs)
+
+        with mock.patch.object(self.mgr.db, "add_image", side_effect=flaky):
+            with self.assertRaises(RuntimeError):
+                self.mgr._process_fursuit_fursee(p, p, {"label_cn": "兽装"})
+
+        rows = self.mgr.db.conn.execute(
+            "SELECT COUNT(*) FROM identity_image WHERE image_path = ?", (p,)
+        ).fetchone()[0]
+        self.assertEqual(
+            rows, 0,
+            "中途失败必须整张回滚，否则整图查重会让它永远缺 detection")
+        self.assertTrue(os.path.exists(p), "失败不得删除原照片")
+
 if __name__ == "__main__":
     unittest.main()

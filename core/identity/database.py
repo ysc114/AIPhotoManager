@@ -199,7 +199,8 @@ class IdentityDatabase:
         cols = ["id", "name", "type", "description", "cover_image", "created_at", "updated_at"]
         return [self._row_to_dict(r, cols) for r in rows]
 
-    def update_group(self, group_id, **kwargs):
+    def update_group(self, group_id, commit=True, **kwargs):
+        """更新组字段；commit=False 时由调用方控制事务提交。"""
         allowed = {"name", "description", "cover_image"}
         updates = {k: v for k, v in kwargs.items() if k in allowed}
         if not updates:
@@ -208,7 +209,8 @@ class IdentityDatabase:
         set_clause = ", ".join(f"{k} = ?" for k in updates)
         values = list(updates.values()) + [group_id]
         self.conn.execute(f"UPDATE identity_group SET {set_clause} WHERE id = ?", values)
-        self.conn.commit()
+        if commit:
+            self.conn.commit()
 
     def delete_group(self, group_id):
         self.conn.execute("DELETE FROM identity_image WHERE group_id = ?", (group_id,))
@@ -329,7 +331,7 @@ class IdentityDatabase:
 
     def add_image(self, group_id, image_path, embedding=None,
                   embedding_type="", bbox=None, layer1_category="", confidence=0.0,
-                  detection_index=0):
+                  detection_index=0, commit=True):
         """upsert 一条 identity_image 记录（schema v2：按复合键查重）。
 
         唯一键为 (image_path, detection_index)：
@@ -369,10 +371,13 @@ class IdentityDatabase:
                  bbox_str, layer1_category, confidence, now)
             )
 
-        cover = self.get_group_cover(group_id)
-        if not cover:
-            self.update_group(group_id, cover_image=image_path)
-        self.conn.commit()
+        # 空 group_id = 未分配：无封面可更新（同时避免在合并事务里提前 commit）
+        if group_id:
+            cover = self.get_group_cover(group_id)
+            if not cover:
+                self.update_group(group_id, cover_image=image_path, commit=commit)
+        if commit:
+            self.conn.commit()
 
     def get_images_by_group(self, group_id):
         rows = self.conn.execute(

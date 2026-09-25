@@ -200,18 +200,26 @@ class IdentityManager:
             return
 
         label_cn = l1_info.get("label_cn", "")
-        for det_index, det in enumerate(detections):
-            embedding = np.asarray(det.get("embedding"), dtype=np.float32)
-            self.db.add_image(
-                group_id="",
-                image_path=path,
-                embedding=embedding,
-                embedding_type="fursuit_fursee",
-                bbox=det.get("bbox"),
-                layer1_category=label_cn,
-                confidence=det.get("confidence", 0.0),
-                detection_index=det_index,
-            )
+        # 多 detection 一次事务提交：中途失败整张回滚，不留「半张照片」
+        # 的记录——否则整图 path 查重会让这张照片永远不再补录剩余 detection。
+        try:
+            for det_index, det in enumerate(detections):
+                embedding = np.asarray(det.get("embedding"), dtype=np.float32)
+                self.db.add_image(
+                    group_id="",
+                    image_path=path,
+                    embedding=embedding,
+                    embedding_type="fursuit_fursee",
+                    bbox=det.get("bbox"),
+                    layer1_category=label_cn,
+                    confidence=det.get("confidence", 0.0),
+                    detection_index=det_index,
+                    commit=False,
+                )
+            self.db.conn.commit()
+        except Exception:
+            self.db.conn.rollback()
+            raise
 
     def _get_fursee_adapter(self):
         """懒加载并确保 FurseeAdapter 就绪（幂等）。
