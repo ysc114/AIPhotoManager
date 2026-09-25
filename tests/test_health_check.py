@@ -148,5 +148,106 @@ class SettingsHealthUiTests(unittest.TestCase):
             page.close()
 
 
+class HealthActionButtonsTests(unittest.TestCase):
+    """体检「一键修复」按钮：按结果启用/置灰，跳转复用既有导航。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def _page(self):
+        from ui.settings_center import SettingsCenterPage
+        return SettingsCenterPage(win=None)
+
+    @staticmethod
+    def _result(**counts):
+        def item(key, label, status, count=0, detail="", fix=""):
+            return {"key": key, "label": label, "status": status,
+                    "count": count, "detail": detail, "fix": fix}
+        return {"items": [
+            item("stale_analysis_cache", "分析缓存",
+                 STATUS_WARN if counts.get("stale_analysis") else STATUS_OK,
+                 counts.get("stale_analysis", 0)),
+            item("stale_visual_fingerprints", "视觉指纹缓存",
+                 STATUS_WARN if counts.get("stale_visual") else STATUS_OK,
+                 counts.get("stale_visual", 0)),
+            item("pending_photos", "photos/ 待入库",
+                 STATUS_WARN if counts.get("pending") else STATUS_OK,
+                 counts.get("pending", 0)),
+            item("visual_search_index", "语义搜索索引",
+                 STATUS_WARN if counts.get("index_warn") else STATUS_OK, 0,
+                 detail="状态 mismatch：已索引 10/20"),
+            item("duplicate_photos", "完全重复照片",
+                 STATUS_WARN if counts.get("duplicates") else STATUS_OK,
+                 counts.get("duplicates", 0)),
+        ], "warnings": 0, "errors": 0, "ok_count": 5}
+
+    def test_buttons_disabled_without_issues(self):
+        page = self._page()
+        try:
+            page._sync_health_actions(self._result())
+            for key, btn in page._health_btns.items():
+                self.assertFalse(btn.isEnabled(), f"{key} 无问题应置灰")
+        finally:
+            page.close()
+
+    def test_buttons_enabled_with_counts(self):
+        page = self._page()
+        try:
+            page._sync_health_actions(self._result(
+                stale_analysis=3, stale_visual=5, pending=28,
+                index_warn=1, duplicates=2))
+            btns = page._health_btns
+            self.assertTrue(btns["stale_caches"].isEnabled())
+            self.assertIn("8", btns["stale_caches"].toolTip(), "3+5 条失效缓存")
+            self.assertTrue(btns["pending"].isEnabled())
+            self.assertIn("28", btns["pending"].toolTip())
+            self.assertTrue(btns["index"].isEnabled())
+            self.assertIn("mismatch", btns["index"].toolTip())
+            self.assertTrue(btns["duplicates"].isEnabled())
+            self.assertIn("2", btns["duplicates"].toolTip())
+        finally:
+            page.close()
+
+    def test_goto_pages_uses_existing_navigation(self):
+        from ui.main_window_v3 import MainWindow
+        win = MainWindow()
+        win._ui_ready = True
+        page = None
+        try:
+            from ui.settings_center import SettingsCenterPage
+            page = SettingsCenterPage(win=win)
+            with mock.patch.object(win, "_switch_page") as sw:
+                page._goto_pending_page()
+                self.assertEqual(sw.call_args[0][0],
+                                 win.content_stack.indexOf(win.pending_page))
+                page._goto_duplicates_page()
+                self.assertEqual(sw.call_args[0][0],
+                                 win.content_stack.indexOf(win.duplicates_page))
+        finally:
+            if page is not None:
+                page.close()
+            win.close()
+
+    def test_real_run_syncs_buttons_consistently(self):
+        """真实库跑一次体检：按钮可用性与报告中的 warn 项一致。"""
+        page = self._page()
+        try:
+            page._run_health_check()
+            res = page._health_result
+            pending = [i for i in res["items"] if i["key"] == "pending_photos"][0]
+            self.assertEqual(
+                page._health_btns["pending"].isEnabled(),
+                pending["status"] == STATUS_WARN)
+            stale = sum(int(i["count"] or 0) for i in res["items"]
+                        if i["key"] in ("stale_analysis_cache",
+                                        "stale_visual_fingerprints")
+                        and i["status"] == STATUS_WARN)
+            self.assertEqual(page._health_btns["stale_caches"].isEnabled(),
+                             stale > 0)
+        finally:
+            page.close()
+
+
 if __name__ == "__main__":
     unittest.main()

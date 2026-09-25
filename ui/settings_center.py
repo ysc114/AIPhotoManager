@@ -727,6 +727,22 @@ class SettingsCenterPage(QWidget):
         health_row.addStretch(1)
         body.addLayout(health_row)
 
+        # 体检可自动修的项目：一键直达（未体检/无问题时置灰）
+        act_row = QHBoxLayout()
+        act_row.setSpacing(10)
+        self._health_btns = {}
+        for key, text, slot in (
+                ("stale_caches", "🧹 清理失效缓存", self._clean_cache),
+                ("pending", "📡 去处理待入库", self._goto_pending_page),
+                ("index", "🧠 更新视觉索引", self._update_visual_index),
+                ("duplicates", "♻️ 去重复照片页", self._goto_duplicates_page)):
+            btn = self._glass_btn(text, ("#57c78a", "#6aaee8"), slot)
+            btn.setEnabled(False)
+            self._health_btns[key] = btn
+            act_row.addWidget(btn)
+        act_row.addStretch(1)
+        body.addLayout(act_row)
+
         tip = QLabel("不提供「重新聚类全部照片」。全量重聚会拆散人工合并结果，请使用「AI 找候选 → 人工确认 → 合并」流程。")
         tip.setStyleSheet("font-size:11px;color:#a0aab8;background:transparent;border:none;")
         tip.setWordWrap(True)
@@ -1193,6 +1209,7 @@ class SettingsCenterPage(QWidget):
             result = run_health_check()
             label.setText(format_report(result))
             self._health_result = result
+            self._sync_health_actions(result)
         except Exception as e:
             label.setText(f"❌ 体检失败：{e}")
         finally:
@@ -1201,6 +1218,65 @@ class SettingsCenterPage(QWidget):
                 QGuiApplication.restoreOverrideCursor()
             except Exception:
                 pass
+
+    @staticmethod
+    def _health_item(result, key):
+        for it in (result or {}).get("items") or []:
+            if it.get("key") == key:
+                return it
+        return None
+
+    def _sync_health_actions(self, result):
+        """按体检结果启用「一键修复」按钮（无问题则保持置灰）。"""
+        btns = getattr(self, "_health_btns", None)
+        if not btns:
+            return
+        stale = 0
+        for key in ("stale_analysis_cache", "stale_visual_fingerprints"):
+            it = self._health_item(result, key)
+            if it and it.get("status") == "warn":
+                stale += int(it.get("count") or 0)
+        pending = self._health_item(result, "pending_photos")
+        index = self._health_item(result, "visual_search_index")
+        dup = self._health_item(result, "duplicate_photos")
+        pending_n = int(pending.get("count") or 0) if pending else 0
+        dup_n = int(dup.get("count") or 0) if dup else 0
+        index_warn = bool(index and index.get("status") == "warn")
+
+        btns["stale_caches"].setEnabled(stale > 0)
+        btns["stale_caches"].setToolTip(
+            f"共 {stale} 条失效缓存（分析 + 视觉指纹）" if stale
+            else "当前没有失效缓存")
+        btns["pending"].setEnabled(pending_n > 0)
+        btns["pending"].setToolTip(
+            f"{pending_n} 张照片待入库：跳到待处理页扫描/分析" if pending_n
+            else "没有待入库照片")
+        btns["index"].setEnabled(index_warn)
+        btns["index"].setToolTip(
+            (index or {}).get("detail") or "语义搜索索引需要更新"
+            if index_warn else "语义搜索索引当前正常")
+        btns["duplicates"].setEnabled(dup_n > 0)
+        btns["duplicates"].setToolTip(
+            f"{dup_n} 个多余副本：跳到重复照片页处理" if dup_n
+            else "没有完全重复的照片")
+
+    def _goto_pending_page(self):
+        """体检 → 跳到「待处理」页（复用既有导航，不触发任何写操作）。"""
+        win = self.win
+        page = getattr(win, "pending_page", None) if win else None
+        if win is None or page is None:
+            self._health_label.setText("主窗口未就绪，无法跳转。")
+            return
+        win._switch_page(win.content_stack.indexOf(page))
+
+    def _goto_duplicates_page(self):
+        """体检 → 跳到「重复照片」页（进入后由该页自行懒扫描）。"""
+        win = self.win
+        page = getattr(win, "duplicates_page", None) if win else None
+        if win is None or page is None:
+            self._health_label.setText("主窗口未就绪，无法跳转。")
+            return
+        win._switch_page(win.content_stack.indexOf(page))
 
     def _clean_cache(self):
         """清理失效缓存：文件已删除的分析缓存条目 + 视觉指纹记录。
