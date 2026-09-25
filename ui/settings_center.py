@@ -735,7 +735,8 @@ class SettingsCenterPage(QWidget):
                 ("stale_caches", "🧹 清理失效缓存", self._clean_cache),
                 ("pending", "📡 去处理待入库", self._goto_pending_page),
                 ("index", "🧠 更新视觉索引", self._update_visual_index),
-                ("duplicates", "♻️ 去重复照片页", self._goto_duplicates_page)):
+                ("duplicates", "♻️ 去重复照片页", self._goto_duplicates_page),
+                ("backup", "💾 立即备份", self._do_backup_now)):
             btn = self._glass_btn(text, ("#57c78a", "#6aaee8"), slot)
             btn.setEnabled(False)
             self._health_btns[key] = btn
@@ -1259,6 +1260,12 @@ class SettingsCenterPage(QWidget):
         btns["duplicates"].setToolTip(
             f"{dup_n} 个多余副本：跳到重复照片页处理" if dup_n
             else "没有完全重复的照片")
+        backup = self._health_item(result, "backup_freshness")
+        backup_warn = bool(backup and backup.get("status") == "warn")
+        btns["backup"].setEnabled(backup_warn)
+        btns["backup"].setToolTip(
+            (backup or {}).get("detail") or "备份需要更新"
+            if backup_warn else "数据库备份是最新的")
 
     def _goto_pending_page(self):
         """体检 → 跳到「待处理」页（复用既有导航，不触发任何写操作）。"""

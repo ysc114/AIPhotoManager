@@ -11,6 +11,7 @@
 
 import os
 import sqlite3
+import time
 
 STATUS_OK = "ok"
 STATUS_WARN = "warn"
@@ -162,6 +163,46 @@ def run_health_check(photos_dir=None, db_path=None, analysis_cache_file=None,
                            fix="设置中心「🧠 更新视觉索引」" if status == STATUS_WARN else ""))
     except Exception as e:
         items.append(_item("visual_search_index", "语义搜索索引", STATUS_WARN,
+                           detail=f"读取失败：{str(e)[:60]}"))
+
+    # ---- 数据备份新鲜度（库里是人工整理成果，值得提醒）----
+    try:
+        backup_root = os.path.join(root, "backups")
+        newest_ts = None
+        if os.path.isdir(backup_root):
+            for dirpath, _dirs, filenames in os.walk(backup_root):
+                for name in filenames:
+                    if not name.endswith((".sqlite", ".db")):
+                        continue
+                    try:
+                        ts = os.path.getmtime(os.path.join(dirpath, name))
+                    except OSError:
+                        continue
+                    if newest_ts is None or ts > newest_ts:
+                        newest_ts = ts
+        try:
+            db_ts = os.path.getmtime(db_path)
+        except OSError:
+            db_ts = None
+        if newest_ts is None:
+            items.append(_item(
+                "backup_freshness", "数据备份", STATUS_WARN, 0,
+                detail="还没有任何数据库备份",
+                fix="设置中心「💾 立即备份」或开启自动备份"))
+        else:
+            age_days = int((time.time() - newest_ts) / 86400)
+            stale = age_days > 14
+            db_newer = bool(db_ts and db_ts > newest_ts + 3600)
+            detail = f"最近备份 {age_days} 天前"
+            if db_newer:
+                detail += "，之后库又有改动（尚无对应备份）"
+            items.append(_item(
+                "backup_freshness", "数据备份",
+                STATUS_WARN if (stale or db_newer) else STATUS_OK, age_days,
+                detail=detail,
+                fix="设置中心「💾 立即备份」" if (stale or db_newer) else ""))
+    except Exception as e:
+        items.append(_item("backup_freshness", "数据备份", STATUS_WARN,
                            detail=f"读取失败：{str(e)[:60]}"))
 
     # ---- 云同步残留（百度网盘会在被同步目录里写 .cfg 占位文件）----

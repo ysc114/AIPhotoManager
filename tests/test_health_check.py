@@ -3,6 +3,7 @@
 import os
 import shutil
 import tempfile
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -51,6 +52,19 @@ class HealthCheckTests(unittest.TestCase):
         db.close()
         return gid
 
+    def _fresh_backup(self):
+        """造一个比库更新的备份（备份项判 ok 用）。"""
+        d = Path(self.tmp) / "backups" / "autobackup_test"
+        d.mkdir(parents=True, exist_ok=True)
+        f = d / "identity_db.sqlite"
+        f.write_bytes(b"backup")
+        now = time.time()
+        os.utime(f, (now, now))
+        if os.path.exists(self.db_path):
+            old = now - 3600
+            os.utime(self.db_path, (old, old))
+        return f
+
     def _run(self, **kw):
         kw.setdefault("photos_dir", self.photos)
         kw.setdefault("db_path", self.db_path)
@@ -64,6 +78,7 @@ class HealthCheckTests(unittest.TestCase):
     def test_all_healthy(self):
         p = self._photo("a.jpg")
         self._db([p])
+        self._fresh_backup()
         r = self._run()
         self.assertEqual(r["errors"], 0)
         self.assertEqual(r["warnings"], 0, format_report(r))
@@ -122,6 +137,7 @@ class HealthCheckTests(unittest.TestCase):
     def test_format_report_lists_items_and_conclusion(self):
         p = self._photo("a.jpg")
         self._db([p])
+        self._fresh_backup()
         text = format_report(self._run())
         self.assertIn("数据库完整性", text)
         self.assertIn("体检结论", text)
@@ -181,7 +197,11 @@ class HealthActionButtonsTests(unittest.TestCase):
             item("duplicate_photos", "完全重复照片",
                  STATUS_WARN if counts.get("duplicates") else STATUS_OK,
                  counts.get("duplicates", 0)),
-        ], "warnings": 0, "errors": 0, "ok_count": 5}
+            item("backup_freshness", "数据备份",
+                 STATUS_WARN if counts.get("backup_stale") else STATUS_OK,
+                 counts.get("backup_stale", 0),
+                 detail="最近备份 29 天前"),
+        ], "warnings": 0, "errors": 0, "ok_count": 6}
 
     def test_buttons_disabled_without_issues(self):
         page = self._page()
@@ -197,7 +217,7 @@ class HealthActionButtonsTests(unittest.TestCase):
         try:
             page._sync_health_actions(self._result(
                 stale_analysis=3, stale_visual=5, pending=28,
-                index_warn=1, duplicates=2))
+                index_warn=1, duplicates=2, backup_stale=29))
             btns = page._health_btns
             self.assertTrue(btns["stale_caches"].isEnabled())
             self.assertIn("8", btns["stale_caches"].toolTip(), "3+5 条失效缓存")
@@ -207,6 +227,19 @@ class HealthActionButtonsTests(unittest.TestCase):
             self.assertIn("mismatch", btns["index"].toolTip())
             self.assertTrue(btns["duplicates"].isEnabled())
             self.assertIn("2", btns["duplicates"].toolTip())
+
+            self.assertTrue(btns["backup"].isEnabled(), "备份过期应可一键备份")
+            self.assertIn("29 天前", btns["backup"].toolTip())
+        finally:
+            page.close()
+
+    def test_backup_button_calls_backup(self):
+        page = self._page()
+        try:
+            page._sync_health_actions(self._result(backup_stale=29))
+            with mock.patch.object(page, "_do_backup_now") as backup:
+                page._health_btns["backup"].click()
+            self.assertTrue(backup.called, "一键备份应调用既有备份动作")
         finally:
             page.close()
 
@@ -248,6 +281,66 @@ class HealthActionButtonsTests(unittest.TestCase):
                              stale > 0)
         finally:
             page.close()
+
+
+class BackupFreshnessTests(unittest.TestCase):
+    """备份新鲜度：无备份/过期/库比备份更新 → warn；新鲜备份 → ok。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="backup_")
+        self.db_path = os.path.join(self.tmp, "id.sqlite")
+        Path(self.db_path).write_bytes(b"db")
+        self.day = 86400
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _backup(self, age_days):
+        d = Path(self.tmp) / "backups" / "autobackup_test"
+        d.mkdir(parents=True, exist_ok=True)
+        f = d / "identity_db.sqlite"
+        f.write_bytes(b"backup")
+        ts = time.time() - age_days * self.day
+        os.utime(f, (ts, ts))
+        return f
+
+    def _run(self):
+        return run_health_check(
+            photos_dir=os.path.join(self.tmp, "photos"),
+            db_path=self.db_path,
+            analysis_cache_file=os.path.join(self.tmp, "analysis_cache.json"),
+            visual_index_path=os.path.join(self.tmp, "visual_similarity.json"),
+            visual_search_cache_dir=os.path.join(self.tmp, "vs_cache"),
+            include_duplicates=False,
+            project_root=self.tmp)
+
+    def test_no_backup_warns(self):
+        item = _item(self._run(), "backup_freshness")
+        self.assertEqual(item["status"], STATUS_WARN)
+        self.assertIn("还没有任何数据库备份", item["detail"])
+        self.assertIn("立即备份", item["fix"])
+
+    def test_fresh_backup_is_ok(self):
+        self._backup(1)
+        db_ts = time.time() - 2 * self.day
+        os.utime(self.db_path, (db_ts, db_ts))     # 库比备份旧 → 已覆盖
+        item = _item(self._run(), "backup_freshness")
+        self.assertEqual(item["status"], STATUS_OK, item["detail"])
+        self.assertEqual(item["count"], 1)
+
+    def test_stale_backup_warns(self):
+        self._backup(30)
+        item = _item(self._run(), "backup_freshness")
+        self.assertEqual(item["status"], STATUS_WARN)
+        self.assertIn("30 天前", item["detail"])
+
+    def test_db_newer_than_backup_warns(self):
+        self._backup(3)
+        now = time.time()
+        os.utime(self.db_path, (now, now))         # 备份之后库又改了
+        item = _item(self._run(), "backup_freshness")
+        self.assertEqual(item["status"], STATUS_WARN)
+        self.assertIn("之后库又有改动", item["detail"])
 
 
 class StartupHealthCheckTests(unittest.TestCase):
