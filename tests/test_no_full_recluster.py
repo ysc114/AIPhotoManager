@@ -13,6 +13,7 @@ tests/test_no_full_recluster.py
 import os
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 import numpy as np
@@ -135,6 +136,25 @@ class NoFullReclusterTests(unittest.TestCase):
                 "SELECT COUNT(*) FROM identity_image WHERE embedding_type='fursuit_fursee'"
             ).fetchone()[0], 0,
         )
+
+    def test_cluster_module_has_no_top_level_sklearn_import(self):
+        """防回归：sklearn 只能惰性导入（模块级导入 ~1.5s，拖慢启动后首刷）。
+
+        全量 DBSCAN 属默认禁止路径；incremental_assign 只用 numpy。
+        """
+        import ast
+        src = Path(__file__).resolve().parents[1] / "core" / "identity" / "cluster.py"
+        tree = ast.parse(src.read_text(encoding="utf-8"), filename=str(src))
+        for node in tree.body:          # 只看模块顶层
+            if isinstance(node, ast.Import):
+                names = [a.name for a in node.names]
+            elif isinstance(node, ast.ImportFrom):
+                names = [node.module or ""]
+            else:
+                continue
+            self.assertFalse(
+                any(n.split(".")[0] == "sklearn" for n in names),
+                "core/identity/cluster.py 不得在模块顶层导入 sklearn")
 
 
 if __name__ == "__main__":

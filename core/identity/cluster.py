@@ -16,7 +16,9 @@ P-C4-C2：新增 fursuit_fursee 分支。
 """
 
 import numpy as np
-from sklearn.cluster import DBSCAN
+# 注意：sklearn 只在「显式全量重建」路径用到（默认禁止），
+# 故改为函数内惰性导入——模块级导入会让 import core.identity 平白
+# 多花 ~1.5s（sklearn 首次导入），拖慢启动后的总览刷新。
 
 
 class IdentityCluster:
@@ -172,6 +174,7 @@ class IdentityCluster:
             keys = None
             embeddings = np.array([r[1] for r in valid])
 
+        from sklearn.cluster import DBSCAN   # 惰性导入：仅全量重建用
         clustering = DBSCAN(eps=eps, min_samples=min_samples, metric=metric).fit(embeddings)
         labels = clustering.labels_
 
