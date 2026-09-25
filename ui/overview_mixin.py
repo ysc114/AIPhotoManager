@@ -337,6 +337,11 @@ class _OverviewMixinMixin:
         if dup is not None and self.content_stack.indexOf(dup) == row:
             dup.ensure_scanned()
 
+        # 照片页：首次进入自动载入 photos/（列表非空则不动）
+        photo_page = getattr(self, "photo_page", None)
+        if photo_page is not None and self.content_stack.indexOf(photo_page) == row:
+            self._ensure_photos_loaded()
+
         # 切到总览页时刷新统计（构造期间 _ui_ready=False 不触发，
         # 避免测试进程打开真实库；启动后由 QTimer / 用户点击触发）
         if row == 0 and self._ui_ready:

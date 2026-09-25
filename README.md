@@ -25,7 +25,7 @@ AI 照片管理系统：本地 + NAS 照片管理，AI 自动分类、兽装/人
 
 ## 一、功能概览
 
-- **照片管理**：本地 photos/ 目录扫描、入库、预览（完整原图）
+- **照片管理**：本地 photos/ 目录扫描、入库、预览（完整原图）；**首次进入照片页自动载入 photos/ 全库**（列表已有内容或已载入过则不动，实测 194 张 ~0.18s，缩略图后台补齐）
 - **AI 分类**：L1 粗分类（CLIP）→ 路由（`fursuit` 兽装 / `person` 人物 / `None` 其他）
 - **Fursee 兽装识别**：YOLO 主体检测 + 512D 归一化 embedding（独立 worker 进程）
 - **角色分组**：DBSCAN 聚类 + **Incremental Assignment 增量分配**（新照片只加入/新建，不拆散已有组）
@@ -303,6 +303,7 @@ QT_QPA_PLATFORM=offscreen C:/Program Files/Python310/python.exe -m unittest disc
 | 全库重复扫描 `DuplicateScanner.scan()` | 0.02s |
 | 照片列表填充（全库 162 张，缓存优先 + 后台补图） | ~0.11s（改前 5.5s） |
 | 收藏页瓦片渲染（50 张，缓存优先 + 后台补图） | ~0.06s（改前 2.2s） |
+| 照片页首次自动载入全库（194 张） | ~0.18s（图标 1.2s 内后台补齐） |
 | 角色页 221 组卡片全量渲染（分批，不阻塞） | ~1.4s |
 | 常驻内存 RSS | ~136MB |
 

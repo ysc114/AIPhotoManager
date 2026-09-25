@@ -1753,6 +1753,38 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         elif payload.get("path"):
             self._open_photo_by_path(payload["path"])
 
+    def _ensure_photos_loaded(self):
+        """首次进入照片页时自动载入项目 photos/（实测 194 张约 0.11s）。
+
+        仅在列表为空且从未自动载入过时执行；用户已手动开过文件夹/做过相似
+        搜索（列表非空）则完全不动，避免覆盖用户当前上下文。
+        """
+        if self.image_list or getattr(self, "_photos_autoload_done", False):
+            return
+        self._photos_autoload_done = True
+        photos_dir = os.path.abspath(os.path.join(
+            os.path.dirname(__file__), "..", "photos"))
+        if not os.path.isdir(photos_dir):
+            return
+        exts = (".jpg", ".jpeg", ".png", ".webp")
+        try:
+            names = sorted(os.listdir(photos_dir))
+        except OSError:
+            return
+        files = [os.path.join(photos_dir, n).replace("\\", "/")
+                 for n in names
+                 if os.path.splitext(n)[1].lower() in exts]
+        if not files:
+            return
+        self.image_list = files
+        self._photo_detection_context = None
+        self._photo_list_mode = ""
+        self._photo_list_backup = None
+        self._populate_photo_list(files)
+        self.statusBar().showMessage(
+            f"已载入 photos/ 共 {len(files)} 张（可用「📂 打开文件夹」切换目录）",
+            6000)
+
     def _populate_photo_list(self, paths, select=0, labels=None):
         """统一填充照片列表：磁盘缩略图缓存优先，未命中走后台补图。
 

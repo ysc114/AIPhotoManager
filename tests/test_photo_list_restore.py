@@ -114,5 +114,55 @@ class PhotoListRestoreTests(unittest.TestCase):
         self.assertTrue(self.win.btn_restore_list.isHidden())
 
 
+class PhotoAutoLoadTests(unittest.TestCase):
+    """照片页首次进入自动载入 photos/（列表非空/已载入过则不动）。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        from ui.main_window_v3 import MainWindow
+        self.win = MainWindow()
+        self.win._ui_ready = True
+        self.win.show()
+        self.app.processEvents()
+
+    def tearDown(self):
+        self.win.close()
+
+    def _photo_page_row(self):
+        return self.win.content_stack.indexOf(self.win.photo_page)
+
+    def test_first_visit_autoloads_photos(self):
+        self.assertEqual(self.win.image_list, [])
+        self.win._on_bottom_nav_changed(self._photo_page_row())
+        self.app.processEvents()
+        self.assertTrue(self.win.image_list,
+                        "首次进入照片页应自动载入 photos/")
+        self.assertEqual(self.win.image_list_widget.count(),
+                         len(self.win.image_list))
+        self.assertTrue(getattr(self.win, "_photos_autoload_done", False))
+        self.assertIn("photos/", self.win.statusBar().currentMessage())
+
+    def test_existing_list_not_overwritten(self):
+        self.win.image_list = [PHOTO_A]
+        self.win._populate_photo_list(self.win.image_list)
+        self.win._on_bottom_nav_changed(self._photo_page_row())
+        self.assertEqual(self.win.image_list, [PHOTO_A],
+                         "已有列表不应被自动载入覆盖")
+
+    def test_autoload_only_once(self):
+        self.win._on_bottom_nav_changed(self._photo_page_row())
+        self.app.processEvents()
+        n = len(self.win.image_list)
+        self.assertGreater(n, 0)
+        self.win.image_list = []          # 模拟用户清空
+        self.win._on_bottom_nav_changed(0)
+        self.win._on_bottom_nav_changed(self._photo_page_row())
+        self.assertEqual(self.win.image_list, [],
+                         "只自动载入一次，避免反复覆盖用户上下文")
+
+
 if __name__ == "__main__":
     unittest.main()
