@@ -298,6 +298,8 @@ QT_QPA_PLATFORM=offscreen C:/Program Files/Python310/python.exe -m unittest disc
 | 角色页 221 组卡片全量渲染（分批，不阻塞） | ~1.4s |
 | 常驻内存 RSS | ~136MB |
 
+性能护栏（`tests/test_performance.py`，2026-09-25 收紧）：启动可交互 ≤2.5s、角色页加载 ≤0.6s、搜索索引 ≤0.3s、全库 MD5 扫描 ≤0.5s。
+
 关键惰性点（改动前都是启动期同步开销）：
 
 - 重复照片页：`auto_scan=False`，**首次进入页面才扫描**（MD5 + 指纹变化检查）

@@ -4,8 +4,14 @@
 - 角色页纯构建 ~0.76s（占位优先后）
 - 启动可交互（构造+show+首帧）~1.7s
 - 搜索索引构建 ~0.12s；MD5 全库扫描 ~0.4s
-阈值取实测 3~5 倍：性能明显回退（如重新引入同步封面解码/重复 MD5）
-时触发，正常波动不误报。
+
+2026-09-25 收紧一轮（此前阈值 3~4s 远宽于现状）：
+- 启动可交互 0.62~0.72s（5 次）→ 阈值 4.0s → 2.5s
+- 角色页加载 0.115~0.125s（5 次）→ 阈值 3.0s → 0.6s
+- 搜索索引构建 0.011s → 阈值 1.5s → 0.3s
+- 全库 MD5 扫描 0.017s → 阈值 3.0s → 0.5s
+阈值仍取实测 3~6 倍：明显回退（如同步封面解码/重复 MD5）时触发，
+正常波动（同步盘/杀软抖动）不误报。
 """
 
 import os
@@ -19,10 +25,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from PySide6.QtWidgets import QApplication
 
 # 阈值（秒）
-LIMIT_ROLE_PAGE_LOAD = 3.0      # 纯构建（无事件循环）
-LIMIT_STARTUP_INTERACTIVE = 4.0  # 构造 + show + 首帧
-LIMIT_SEARCH_INDEX = 1.5        # 搜索索引构建
-LIMIT_MD5_SCAN = 3.0            # 全库 MD5 扫描
+LIMIT_ROLE_PAGE_LOAD = 0.6      # 纯构建（无事件循环）
+LIMIT_STARTUP_INTERACTIVE = 2.5  # 构造 + show + 首帧
+LIMIT_SEARCH_INDEX = 0.3        # 搜索索引构建
+LIMIT_MD5_SCAN = 0.5            # 全库 MD5 扫描
 
 
 def settle(app, frames=8, dt=0.02):
