@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
+from PySide6.QtCore import Qt
+from PySide6.QtTest import QTest
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -179,6 +181,89 @@ class DetectionAwareUiTests(unittest.TestCase):
             window.close()
             shutil.rmtree(tmpdir, ignore_errors=True)
 
+
+    def _multi_role_setup(self, window, tmpdir):
+        """构造一张合照（角标显示 ×2）并返回 (photo, group, badge)。"""
+        photo = self._synthetic_photo(tmpdir, "multi.jpg")
+        group = {
+            "character_id": "cid-current",
+            "name": "当前角色",
+            "type": "fursuit_character",
+            "images": [photo],
+            "detections": [{
+                "image_path": photo,
+                "detection_index": 0,
+                "bbox": "[0, 0, 100, 100]",
+                "confidence": 0.9,
+                "embedding_type": "fursuit_fursee",
+            }],
+        }
+        with mock.patch.object(window, "_image_group_counts",
+                               return_value={photo: 2}):
+            window._open_group("fursuit", group, "当前角色")
+        self.app.processEvents()
+        state = window._group_pages["fursuit"]
+        tile = state["wall_grid_layout"].itemAt(0).widget()
+        badges = [lab for lab in tile.findChildren(type(state["wall_count"]))
+                  if "合照" in lab.text()]
+        self.assertTrue(badges, "合照角标应存在")
+        return photo, group, badges[0]
+
+    def test_multi_role_menu_lists_other_roles_and_jumps(self):
+        """菜单只列其他角色；选中后跳转该角色详情页。"""
+        tmpdir = tempfile.mkdtemp()
+        window = MainWindow()
+        try:
+            photo, _, badge = self._multi_role_setup(window, tmpdir)
+            refs = [
+                {"character_id": "cid-current", "name": "当前角色",
+                 "type": "fursuit_character"},
+                {"character_id": "cid-other", "name": "同框角色",
+                 "type": "fursuit_character"},
+            ]
+            others = [r for r in refs if r["character_id"] != "cid-current"]
+            menu = window._build_multi_role_menu(others)
+            labels = [a.text() for a in menu.actions() if a.text()]
+            data = [a.data() for a in menu.actions() if a.data()]
+            self.assertTrue(any("同框角色" in x for x in labels))
+            self.assertEqual(data, ["cid-other"])
+
+            class _StubAction:
+                def data(self):
+                    return "cid-other"
+
+            class _StubMenu:
+                def exec(self, *args, **kwargs):
+                    return _StubAction()
+
+            with mock.patch.object(window, "_image_group_refs",
+                                   return_value=refs), \
+                    mock.patch.object(window, "_build_multi_role_menu",
+                                      return_value=_StubMenu()), \
+                    mock.patch.object(window, "_open_group_by_id") as jump:
+                window._show_multi_role_menu(badge, photo, "cid-current")
+            jump.assert_called_once_with("cid-other")
+        finally:
+            window.close()
+            shutil.rmtree(tmpdir, ignore_errors=True)
+
+    def test_badge_click_routes_to_multi_role_menu(self):
+        """点击角标 → 进入合照菜单派发（不触发照片页跳转）。"""
+        tmpdir = tempfile.mkdtemp()
+        window = MainWindow()
+        try:
+            photo, _, badge = self._multi_role_setup(window, tmpdir)
+            self.assertIn(badge, window._tile_multi_map)
+            with mock.patch.object(window, "_show_multi_role_menu") as menu_call, \
+                    mock.patch.object(window, "_open_photo_in_photo_page") as photo_page:
+                QTest.mouseClick(badge, Qt.LeftButton)
+            self.assertTrue(menu_call.called, "角标点击应打开合照菜单")
+            self.assertEqual(menu_call.call_args[0][1], photo)
+            self.assertEqual(menu_call.call_args[0][2], "cid-current")
+            self.assertFalse(photo_page.called, "角标点击不应跳到照片页")
+        finally:
+            window.close()
+            shutil.rmtree(tmpdir, ignore_errors=True)
 
 if __name__ == "__main__":
     unittest.main()

@@ -12,7 +12,7 @@ from PySide6.QtCore import QPropertyAnimation, QEasingCurve
 from PySide6.QtGui import QPixmap, QColor, QFont, QPainter, QImage, QIcon
 from PySide6.QtWidgets import (
     QLabel, QWidget, QFrame, QPushButton, QGridLayout, QVBoxLayout,
-    QHBoxLayout, QMessageBox, QScrollArea, QStackedWidget, QLineEdit,
+    QHBoxLayout, QMessageBox, QMenu, QScrollArea, QStackedWidget, QLineEdit,
     QComboBox, QFileDialog, QListWidget, QListWidgetItem, QSplitter,
     QInputDialog, QDialog, QDialogButtonBox, QAbstractItemView,
     QGraphicsOpacityEffect, QGraphicsDropShadowEffect,
@@ -490,6 +490,9 @@ class _OverviewMixinMixin:
         for tile in list(self._tile_path_map.keys()):
             if self._tile_path_map[tile][0] == page_key:
                 self._tile_path_map.pop(tile, None)
+        for badge in list(self._tile_multi_map.keys()):
+            if self._tile_multi_map[badge][0] == page_key:
+                self._tile_multi_map.pop(badge, None)
 
         cols = 6
         for idx, (path, det_idx) in enumerate(members):
@@ -559,6 +562,69 @@ class _OverviewMixinMixin:
         except Exception:
             pass
 
+    def _image_group_refs(self, image_path):
+        """只读：该照片所属的全部角色组（含名称/类型），供合照跳转菜单用。"""
+        try:
+            from core.identity import get_reader
+            refs = get_reader().db.get_groups_by_image(image_path) or []
+            # 旧数据隔离（铁律 6）：fursuit_visual 已冻结且 UI 不可达，
+            # 不放进跳转菜单，避免「点了没反应」
+            return [r for r in refs
+                    if str(r.get("embedding_type") or "") != "fursuit_visual"]
+        except Exception as e:
+            print(f"[角色详情] 合照角色查询失败（忽略）: {e}")
+            return []
+
+    def _open_group_by_id(self, character_id):
+        """按角色 id 打开详情页（只构建该组，复用搜索跳转链路）。"""
+        cid = str(character_id or "")
+        if not cid:
+            return False
+        try:
+            from core.identity import get_reader
+            groups = get_reader().get_groups("all", group_id=cid) or []
+        except Exception as e:
+            print(f"[角色详情] 合照跳转失败: {e}")
+            return False
+        if not groups:
+            self.statusBar().showMessage(
+                "该角色组当前不可打开（可能属于旧数据）", 4000)
+            return False
+        self._open_group_from_search(groups[0])
+        return True
+
+    def _build_multi_role_menu(self, refs):
+        """构建「合照里的其他角色」菜单（只构建不弹窗，便于单测）。"""
+        menu = QMenu(self)
+        menu.setStyleSheet(
+            "QMenu{background:rgba(252,253,255,0.98);border:1px solid "
+            "rgba(150,170,200,0.35);border-radius:10px;padding:6px;}"
+            "QMenu::item{padding:5px 18px 5px 12px;border-radius:6px;"
+            "font-size:12.5px;color:#2a3a52;}"
+            "QMenu::item:selected{background:rgba(120,160,255,0.22);}")
+        menu.addAction(f"📸 这张合照里还有其他 {len(refs)} 个角色")
+        menu.addSeparator()
+        for ref in refs[:40]:
+            cid = str(ref.get("character_id") or "")
+            label = ref.get("name") or f"角色 {cid[:10]}"
+            act = menu.addAction(f"🎭 {label}")
+            act.setData(cid)
+        return menu
+
+    def _show_multi_role_menu(self, widget, image_path, current_cid=""):
+        """合照角标点击 → 列出该照片里的其他角色，选中即跳转详情页。"""
+        refs = [r for r in self._image_group_refs(image_path)
+                if str(r.get("character_id") or "") != str(current_cid or "")]
+        if not refs:
+            return
+        menu = self._build_multi_role_menu(refs)
+        chosen = menu.exec(widget.mapToGlobal(QPoint(0, widget.height() + 2)))
+        if chosen is None:
+            return
+        cid = chosen.data()
+        if cid:
+            self._open_group_by_id(cid)
+
     def _render_photo_tile(self, path, det_idx, det_info, page_key, group,
                            group_count=1):
         """渲染「完整原图」缩略图并显示 detection 编号。
@@ -616,7 +682,11 @@ class _OverviewMixinMixin:
                 "font-weight:700;")
             badge.adjustSize()
             badge.move(max(0, image_label.width() - badge.width() - 4), 4)
-            badge.setAttribute(Qt.WA_TransparentForMouseEvents, True)
+            badge.setCursor(Qt.PointingHandCursor)
+            badge.setToolTip("点击查看这张合照里的其他角色")
+            self._tile_multi_map[badge] = (
+                page_key, path, str(group.get("character_id") or ""))
+            badge.installEventFilter(self)
             badge.show()
         caption = QLabel(f"detection #{det_idx}")
         caption.setFixedHeight(15)
@@ -874,6 +944,10 @@ class _OverviewMixinMixin:
             if obj in self._card_group_map:
                 page_key, group, display_name = self._card_group_map[obj]
                 self._open_group(page_key, group, display_name)
+                return True
+            if obj in self._tile_multi_map:
+                _, image_path, current_cid = self._tile_multi_map[obj]
+                self._show_multi_role_menu(obj, image_path, current_cid)
                 return True
             if obj in self._tile_path_map:
                 page_key, group, image_path, detection_index = self._tile_path_map[obj]

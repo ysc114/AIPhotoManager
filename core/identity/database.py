@@ -402,6 +402,31 @@ class IdentityDatabase:
         ).fetchall()
         return {r[0]: int(r[1]) for r in rows}
 
+    def get_groups_by_image(self, image_path):
+        """只读：该照片（任一 detection）所属的全部角色组。
+
+        返回 [{character_id, name, type, detection_index, bbox, confidence}]，
+        按 detection_index 排序；用于「这张合照属于哪些角色」跳转菜单。
+        """
+        if not image_path:
+            return []
+        rows = self.conn.execute(
+            """SELECT i.group_id, g.name, g.type,
+                      i.detection_index, i.bbox, i.confidence, i.embedding_type
+               FROM identity_image AS i
+               LEFT JOIN identity_group AS g ON g.id = i.group_id
+               WHERE i.image_path = ? AND i.group_id <> ''
+               ORDER BY i.detection_index""",
+            (str(image_path),),
+        ).fetchall()
+        return [
+            {"character_id": r[0] or "", "name": r[1] or "",
+             "type": r[2] or "", "detection_index": int(r[3] or 0),
+             "bbox": r[4] or "", "confidence": float(r[5] or 0.0),
+             "embedding_type": r[6] or ""}
+            for r in rows
+        ]
+
     def get_all_embeddings(self, embedding_type=None, include_detection_index=False):
         """读取全部（或指定类型）非空 embedding。
 

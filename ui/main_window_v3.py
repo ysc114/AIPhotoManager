@@ -159,6 +159,7 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         # 卡片/缩略图 → 业务对象映射，供 eventFilter 派发左键点击
         self._card_group_map = {}    # QFrame → (page_key, group_dict, display_name)
         self._tile_path_map = {}     # QLabel → (page_key, group_dict, image_path, detection_index)
+        self._tile_multi_map = {}    # 合照角标 → (page_key, image_path, 当前角色 id)
 
         # Spotlight 全局搜索：面板/快捷键/最近搜索（会话内）
         self._global_search = None

@@ -233,7 +233,7 @@ class IdentityManager:
     # 查询接口
     # ============================================================
 
-    def get_groups(self, group_type=None):
+    def get_groups(self, group_type=None, group_id=None):
         """获取角色组列表。
 
         group_type:
@@ -241,12 +241,15 @@ class IdentityManager:
             "fursuit_character" → 只保留 fursuit_fursee 成员（兽装页）
             "real_person"       → 只保留 face 成员（人物页）
             "all"               → 兽装 + 人物（排除 Legacy；角色页）
+        group_id: 只构建指定角色组（合照跳转用，避免全量构建）
         """
         db_filter = None if group_type == "all" else group_type
         groups = self.db.get_all_groups(group_type=db_filter)
         result = []
         for group in groups:
             if group is None:
+                continue
+            if group_id and str(group.get("id")) != str(group_id):
                 continue
             images = self.db.get_images_by_group(group["id"])
             if images is None:
