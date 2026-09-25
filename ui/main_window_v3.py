@@ -176,6 +176,38 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         # 优化（2026-08-31）：延迟 400ms——首帧统计首次触发 torch import
         # （约 2.3s），先渲染窗口骨架，统计随后异步填充（感知启动提速）。
         QTimer.singleShot(400, self._refresh_overview)
+        # 启动后后台体检一次（只读、0.3s）：有问题就在状态栏提示，
+        # 无需用户先点进设置；无问题则完全静默。
+        QTimer.singleShot(2500, self._startup_health_check)
+
+    def _startup_health_check(self):
+        """启动后后台体检一次（幂等；测试无事件循环 → 不触发）。"""
+        w = getattr(self, "_health_worker", None)
+        if w is not None and w.isRunning():
+            return
+        worker = _HealthCheckWorker()
+        worker.done.connect(self._on_health_check_done)
+        worker.failed.connect(self._on_health_check_failed)
+        self._health_worker = worker
+        worker.start()
+
+    def _on_health_check_done(self, result):
+        self._reap_worker(getattr(self, "_health_worker", None))
+        self._health_worker = None
+        self._health_snapshot = result
+        warn = int((result or {}).get("warnings") or 0)
+        err = int((result or {}).get("errors") or 0)
+        if not warn and not err:
+            return                     # 一切正常：完全静默
+        tip = f"🩺 体检发现 {warn} 项待处理"
+        if err:
+            tip += f" · {err} 项异常"
+        self.statusBar().showMessage(f"{tip}（设置 → 🩺 数据体检 可查看/一键修复）", 12000)
+
+    def _on_health_check_failed(self, err):
+        self._reap_worker(getattr(self, "_health_worker", None))
+        self._health_worker = None
+        print(f"[体检] 启动体检失败（忽略）: {err}")
 
     def _on_main_destroyed(self):
         S.off_change("ui.mode", self._mode_cb)
@@ -1581,7 +1613,7 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         return False
 
     @staticmethod
-    def _reap_index_worker(worker):
+    def _reap_worker(worker):
         """等后台线程真正退出后再丢引用（避免 QThread 析构时仍在运行）。"""
         try:
             if worker is not None and worker.isRunning():
@@ -1609,7 +1641,7 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
             self.statusBar().showMessage(f"视觉索引更新 {cur}/{total}…", 1500)
 
     def _on_visual_index_done(self, stats):
-        self._reap_index_worker(getattr(self, "_visual_index_worker", None))
+        self._reap_worker(getattr(self, "_visual_index_worker", None))
         self._visual_index_worker = None
         self._notify_index_updated(stats or {})
         # 搜索面板开着 → 用当前查询重渲染（语义结果自动刷新）
@@ -1617,7 +1649,7 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
             self._on_global_search_query(self._global_search.query())
 
     def _on_visual_index_failed(self, err):
-        self._reap_index_worker(getattr(self, "_visual_index_worker", None))
+        self._reap_worker(getattr(self, "_visual_index_worker", None))
         self._visual_index_worker = None
         print(f"[视觉索引] 更新失败: {err}")
         self.statusBar().showMessage(f"视觉索引更新失败：{err}", 10000)
@@ -1662,7 +1694,7 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         w.start()
 
     def _on_semantic_build_done(self, stats=None):
-        self._reap_index_worker(getattr(self, "_sem_worker", None))
+        self._reap_worker(getattr(self, "_sem_worker", None))
         self._sem_building = False
         self._sem_worker = None
         self._notify_index_updated(stats or {})
@@ -1671,7 +1703,7 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
             self._on_global_search_query(self._global_search.query())
 
     def _on_semantic_build_failed(self, err):
-        self._reap_index_worker(getattr(self, "_sem_worker", None))
+        self._reap_worker(getattr(self, "_sem_worker", None))
         self._sem_building = False
         self._sem_worker = None
         print(f"[语义搜索] 索引构建失败: {err}")
@@ -2722,6 +2754,20 @@ class _SimilarSearchWorker(QThread):
                 progress_cb=lambda c, t: self.progress_updated.emit(c, t))
             results = index.search_by_image(self._path, encoder, top_k=20)
             self.done_sig.emit(results)
+        except Exception as e:
+            self.failed.emit(str(e))
+
+
+class _HealthCheckWorker(QThread):
+    """后台数据体检（只读、不加载 AI 模型；约 0.3s）。"""
+
+    done = Signal(dict)
+    failed = Signal(str)
+
+    def run(self):
+        try:
+            from core.health_check import run_health_check
+            self.done.emit(run_health_check())
         except Exception as e:
             self.failed.emit(str(e))
 

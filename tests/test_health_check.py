@@ -249,5 +249,69 @@ class HealthActionButtonsTests(unittest.TestCase):
             page.close()
 
 
+class StartupHealthCheckTests(unittest.TestCase):
+    """启动后台体检：有 warning/error 才在状态栏提示，正常时静默。"""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
+    def setUp(self):
+        from ui.main_window_v3 import MainWindow
+        self.win = MainWindow()
+        self.win._ui_ready = True
+
+    def tearDown(self):
+        self.win.close()
+
+    @staticmethod
+    def _result(warn=0, err=0):
+        return {"items": [], "warnings": warn, "errors": err, "ok_count": 9}
+
+    def test_silent_when_healthy(self):
+        self.win.statusBar().clearMessage()
+        self.win._on_health_check_done(self._result())
+        self.assertEqual(self.win.statusBar().currentMessage(), "")
+        self.assertTrue(self.win._health_snapshot)
+
+    def test_hint_when_warnings(self):
+        self.win._on_health_check_done(self._result(warn=2))
+        msg = self.win.statusBar().currentMessage()
+        self.assertIn("体检发现 2 项", msg)
+        self.assertIn("数据体检", msg)
+
+    def test_hint_mentions_errors(self):
+        self.win._on_health_check_done(self._result(warn=1, err=1))
+        msg = self.win.statusBar().currentMessage()
+        self.assertIn("1 项待处理", msg)
+        self.assertIn("1 项异常", msg)
+
+    def test_start_starts_single_worker(self):
+        started = []
+
+        class _StubWorker:
+            def __init__(self):
+                self._running = False
+                started.append(self)
+
+            class _Sig:
+                def connect(self, *a, **k):
+                    pass
+
+            done = _Sig()
+            failed = _Sig()
+
+            def start(self):
+                self._running = True
+
+            def isRunning(self):
+                return self._running
+
+        with mock.patch("ui.main_window_v3._HealthCheckWorker", _StubWorker):
+            self.win._startup_health_check()
+            self.win._startup_health_check()      # 已在跑 → 不重复启动
+        self.assertEqual(len(started), 1)
+
+
 if __name__ == "__main__":
     unittest.main()
