@@ -100,7 +100,13 @@ class DuplicatesPage(QWidget):
 
     data_changed = Signal()          # 删除完成后通知主窗口（图库/角色/统计刷新）
 
-    def __init__(self, photos_dir=None, index_path=None, parent=None):
+    def __init__(self, photos_dir=None, index_path=None, parent=None,
+                 auto_scan=True):
+        """auto_scan=False → 构造时不扫描，首次进入页面再扫描（见 ensure_scanned）。
+
+        主窗口用 False：避免启动时对全库做 MD5/指纹变化检查（同步目录下
+        stat 194 张约 0.2s，MD5 更贵）。单独使用/测试默认 True 保持旧行为。
+        """
         super().__init__(parent)
         self._photos_dir = photos_dir
         self._scanner = DuplicateScanner(photos_dir)
@@ -113,8 +119,10 @@ class DuplicatesPage(QWidget):
         self._similar_query = ""     # ③ 相似搜索当前查询照片
         self._similar_results = []   # ③ 相似搜索结果
 
+        self._scanned = False
         self._build_ui()
-        self.refresh()
+        if auto_scan:
+            self.refresh()
 
     # --------------------------------------------------------
     # UI 构建
@@ -205,9 +213,21 @@ class DuplicatesPage(QWidget):
     # --------------------------------------------------------
     # 刷新（MD5 + 视觉）
     # --------------------------------------------------------
+    def ensure_scanned(self):
+        """首次进入页面时扫描一次（幂等）；之后由各操作自行刷新。"""
+        if self._scanned:
+            return
+        self.refresh()
+
     def refresh(self):
         """重新扫描 MD5（同步）+ 视觉指纹（增量后台或缓存直出）。"""
+        self._scanned = True
         self._groups = self._scanner.scan()
+        # 头部统计立刻更新（视觉指纹是后台增量任务，可能几秒后才回来；
+        # 用户进入页面应马上看到「N 组重复 / M 个文件」）
+        self._stats.setText(
+            f"{len(self._groups)} 组重复 · "
+            f"{sum(len(g['paths']) for g in self._groups)} 个文件")
         self._sel = {}
         for g in self._groups:
             for item in g["paths"]:

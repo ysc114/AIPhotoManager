@@ -326,6 +326,11 @@ class _OverviewMixinMixin:
         if hasattr(self, "bottom_nav"):
             self.bottom_nav.set_current(row)
 
+        # 重复照片页：首次进入才扫描（启动不做全库 MD5/指纹检查）
+        dup = getattr(self, "duplicates_page", None)
+        if dup is not None and self.content_stack.indexOf(dup) == row:
+            dup.ensure_scanned()
+
         # 切到总览页时刷新统计（构造期间 _ui_ready=False 不触发，
         # 避免测试进程打开真实库；启动后由 QTimer / 用户点击触发）
         if row == 0 and self._ui_ready:

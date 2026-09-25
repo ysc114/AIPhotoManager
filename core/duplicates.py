@@ -88,15 +88,34 @@ class DuplicateScanner:
                 if os.path.splitext(n)[1].lower() in _PHOTO_EXTS:
                     files.append(os.path.join(d, n))
         total = len(files)
-        groups = {}
-        for i, p in enumerate(files):
+        # 先按文件大小分组（只 stat，不读内容）：内容相同必然大小相同，
+        # 大小唯一的文件不可能重复 → 完全跳过读盘。全库扫描因此从
+        # 「每张都算 MD5」降为「只算同尺寸那几组」。
+        by_size = {}
+        for p in files:
             try:
-                key = _md5(p)
+                by_size.setdefault(os.path.getsize(p), []).append(p)
             except OSError:
                 continue
-            groups.setdefault(key, []).append(p)
-            if progress_cb and (i % 25 == 0 or i == total - 1):
-                progress_cb(i + 1, total)
+        groups = {}
+        processed = 0
+        for _size, same_size in by_size.items():
+            if len(same_size) < 2:
+                processed += len(same_size)
+                if progress_cb and processed % 25 == 0:
+                    progress_cb(min(processed, total), total)
+                continue
+            for p in same_size:
+                processed += 1
+                try:
+                    key = cached_md5(p)
+                except OSError:
+                    continue
+                groups.setdefault(key, []).append(p)
+                if progress_cb and (processed % 25 == 0 or processed == total):
+                    progress_cb(min(processed, total), total)
+        if progress_cb and processed < total:
+            progress_cb(total, total)
         result = []
         for key, paths in groups.items():
             if len(paths) < 2:

@@ -72,7 +72,26 @@ class DuplicateScannerTests(unittest.TestCase):
         groups = self.scanner.scan()
         self.assertEqual(len(groups[0]["md5"]), 32)   # md5 hex
 
-
+    def test_size_prefilter_skips_unique_sizes(self):
+        """大小唯一的文件不做 MD5（只 stat）；同尺寸才读盘比对。"""
+        from unittest import mock
+        from core.duplicates import cached_md5 as real_md5
+        tmp = tempfile.mkdtemp(prefix="dup_size_")
+        try:
+            _make_photo(tmp, "u1.jpg", b"a" * 100)
+            _make_photo(tmp, "u2.jpg", b"b" * 200)
+            _make_photo(tmp, "d1.jpg", b"c" * 300)
+            _make_photo(tmp, "d2.jpg", b"c" * 300)   # 同尺寸同内容
+            from core.duplicates import DuplicateScanner
+            with mock.patch("core.duplicates.cached_md5",
+                            side_effect=real_md5) as hashed:
+                groups = DuplicateScanner(photos_dir=tmp).scan()
+            self.assertEqual(hashed.call_count, 2,
+                             "只有同尺寸的两张需要读盘算 MD5")
+            self.assertEqual(len(groups), 1)
+            self.assertEqual(len(groups[0]["paths"]), 2)
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
 class DuplicateCleanerTests(unittest.TestCase):
     """安全删除：文件 + 数据库/缓存清理调用 + 失败安全。"""
 
@@ -249,9 +268,14 @@ class MainWindowIntegrationTests(unittest.TestCase):
 
     def test_duplicates_page_in_stack(self):
         self.assertEqual(self.win.content_stack.count(), 10)
-        self.win._on_bottom_nav_changed(8)   # duplicates
+        # 2026-09-25 起：构造主窗口不扫描，首次进入该页才扫描
+        self.assertFalse(self.win.duplicates_page._scanned,
+                         "启动不应做全库 MD5/指纹扫描")
+        idx = self.win.content_stack.indexOf(self.win.duplicates_page)
+        self.win._on_bottom_nav_changed(idx)
         time.sleep(0.05)
-        self.assertEqual(self.win.content_stack.currentIndex(), 8)
+        self.assertEqual(self.win.content_stack.currentIndex(), idx)
+        self.assertTrue(self.win.duplicates_page._scanned, "进入页面应补扫描")
         # 页面统计已生成
         self.assertIn("重复", self.win.duplicates_page._stats.text())
 

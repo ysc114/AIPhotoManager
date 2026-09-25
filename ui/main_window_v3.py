@@ -251,7 +251,8 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         self.settings_page = self._build_settings_page()
         self.content_stack.addWidget(self.settings_page)
         # ── ♻️ 重复照片管理中心（第 10 页）──
-        self.duplicates_page = DuplicatesPage()
+        # auto_scan=False：启动不扫全库，首次进入重复照片页再扫描
+        self.duplicates_page = DuplicatesPage(auto_scan=False)
         self.content_stack.addWidget(self.duplicates_page)
         self.duplicates_page.data_changed.connect(self._on_duplicates_changed)
 
