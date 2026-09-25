@@ -1190,8 +1190,11 @@ class SettingsCenterPage(QWidget):
         """触发主窗口「扫描新照片」（复用既有增量链路）。"""
         if self.win and hasattr(self.win, "_scan_photos_dir"):
             self.win._scan_photos_dir()
-            if hasattr(self.win, "_switch_page"):
-                self.win._switch_page(6)
+            # 扫描结果在「待处理」页；按内容栈索引定位（此前写死 6 = 收藏页）
+            page = getattr(self.win, "pending_page", None)
+            if page is not None and hasattr(self.win, "_switch_page"):
+                self.win._switch_page(
+                    self.win.content_stack.indexOf(page))
         else:
             self._backup_status.setText("无法触发扫描（主窗口未就绪）。")
 

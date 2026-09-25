@@ -1805,7 +1805,8 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
             row = max(0, min(int(select or 0), len(paths) - 1))
             self.image_list_widget.setCurrentRow(row)
         self.btn_restore_list.setVisible(
-            getattr(self, "_photo_list_mode", "") in ("similar", "group"))
+            getattr(self, "_photo_list_mode", "")
+            in ("similar", "group", "favorite"))
 
     def _set_photo_list_icon(self, item, path, size=110):
         """列表行图标：缓存命中直接显示，未命中后台生成后回填（主线程回调）。"""

@@ -7,6 +7,7 @@ import os
 import tempfile
 import shutil
 import unittest
+from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
@@ -94,6 +95,30 @@ class FavoriteTests(unittest.TestCase):
         btns = [b.text() for b in self.window.photo_page.findChildren(QPushButton)]
         self.assertIn("⭐ 收藏当前", btns)
         self.assertIn("♥ 收藏页", btns)
+
+
+    def test_preview_favorite_lands_on_photo_page_and_restores(self):
+        """收藏页点照片 → 照片页（回归：曾误切 AI精选页）+ 可返回原列表。"""
+        win = self.window if hasattr(self, "window") else self.win
+        win._on_bottom_nav_changed(win.content_stack.indexOf(win.photo_page))
+        self.app.processEvents()
+        before = list(win.image_list)
+        if not before:
+            # 照片页尚未自动载入时，先手动放两张真实照片
+            before = [str(Path(__file__).resolve().parents[1] / "photos" / "12.png")]
+            win.image_list = list(before)
+            win._populate_photo_list(before)
+        target = before[0]
+        win._preview_favorite(target)
+        self.app.processEvents()
+        self.assertIs(win.content_stack.currentWidget(), win.photo_page,
+                      "应切到照片页")
+        self.assertEqual(win._photo_list_mode, "favorite")
+        self.assertFalse(win.btn_restore_list.isHidden())
+        win._restore_photo_list()
+        self.app.processEvents()
+        self.assertEqual(win.image_list, before, "应恢复原列表")
+        self.assertEqual(win._photo_list_mode, "")
 
 
 if __name__ == "__main__":

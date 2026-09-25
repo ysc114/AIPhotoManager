@@ -7,10 +7,9 @@ favorites_mixin —— MainWindow 页面方法拆分（纯移动，方法体零�
 import os
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QPixmap, QIcon
 from PySide6.QtWidgets import (
     QLabel, QWidget, QFrame, QPushButton, QGridLayout, QVBoxLayout,
-    QMessageBox, QScrollArea, QListWidgetItem,
+    QMessageBox, QScrollArea,
 )
 
 
@@ -189,20 +188,19 @@ class _FavoritesMixinMixin:
     def _preview_favorite(self, path):
         """收藏页点击 → 照片页预览完整原图（复用现有预览链路）。"""
         resolved = self._resolve_display_path(path)
+        # 快照原列表（未处于过滤态时）→ 照片页可「↩️ 返回全部」
+        if getattr(self, "_photo_list_mode", "") not in (
+                "similar", "group", "favorite"):
+            self._photo_list_backup = list(self.image_list or [])
+            self._photo_list_backup_row = self.image_list_widget.currentRow()
         self.image_list = [resolved]
-        self.image_list_widget.clear()
-        item = QListWidgetItem(os.path.basename(path))
-        pix = QPixmap(resolved)
-        if not pix.isNull():
-            item.setIcon(
-                QIcon(pix.scaled(110, 110, Qt.KeepAspectRatio, Qt.SmoothTransformation))
-            )
-        self.image_list_widget.addItem(item)
+        self._photo_list_mode = "favorite"
         self._photo_detection_context = {
             "row": 0, "path": resolved, "bbox": None,
             "detection_index": None, "group_name": "收藏",
         }
-        self.nav_list.setCurrentRow(1)
-        self.image_list_widget.setCurrentRow(0)
+        # 统一填充（缩略图缓存优先）+ 按内容栈索引切到照片页
+        self._populate_photo_list([resolved], select=0)
+        self._switch_page(self.content_stack.indexOf(self.photo_page))
         self.show_preview(0)
 

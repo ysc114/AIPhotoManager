@@ -100,6 +100,18 @@ class Phase3UiTests(unittest.TestCase):
             finally:
                 page.close()
 
+    def test_rescan_switches_to_pending_page(self):
+        """设置页「重新扫描新照片」→ 跳到待处理页（回归：曾写死 6=收藏页）。"""
+        from unittest import mock
+        win = self.window
+        with mock.patch.object(win, "_scan_photos_dir") as scan, \
+                mock.patch.object(win, "_switch_page") as sw:
+            win.settings_center._rescan()
+        self.assertTrue(scan.called, "应触发扫描")
+        self.assertEqual(sw.call_args[0][0],
+                         win.content_stack.indexOf(win.pending_page),
+                         "应切到待处理页")
+
 
 if __name__ == "__main__":
     unittest.main()
