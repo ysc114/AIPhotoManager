@@ -956,6 +956,16 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
             self.btn_similar
         )
 
+        # ↩️ 返回全部：相似搜索会替换照片列表，这里提供一键恢复
+        self.btn_restore_list = QPushButton(
+            "↩️ 返回全部"
+        )
+        self.btn_restore_list.setToolTip("退出相似搜索，恢复原来的照片列表")
+        self.btn_restore_list.hide()
+        button_layout.addWidget(
+            self.btn_restore_list
+        )
+
         # 🎭 同框角色（反向查询：这张照片里有哪些角色，可跳转）
         self.btn_roles = QPushButton(
             "🎭 同框角色"
@@ -1433,6 +1443,10 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
             self.extract_video_frames
         )
 
+        self.btn_restore_list.clicked.connect(
+            self._restore_photo_list
+        )
+
         self.btn_roles.clicked.connect(
             self._show_photo_roles
         )
@@ -1723,6 +1737,83 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         elif payload.get("path"):
             self._open_photo_by_path(payload["path"])
 
+    def _populate_photo_list(self, paths, select=0, labels=None):
+        """统一填充照片列表：磁盘缩略图缓存优先，未命中走后台补图。
+
+        此前每行同步 `_load_pixmap_cached`（解码原图）——194 张实测 5.5s 主线程
+        卡顿；改走 thumbnail_cache（256px）后首次填充仅需 stat/查缓存，图标由
+        后台线程生成后回填（与角色页/重复页同一套缓存）。
+
+        labels: 可选，与 paths 等长的显示文本（如相似搜索带相似度）。
+        """
+        self.image_list_widget.clear()
+        for i, path in enumerate(paths or []):
+            text = (labels[i] if labels and i < len(labels)
+                    else os.path.basename(path))
+            item = QListWidgetItem(text)
+            self.image_list_widget.addItem(item)
+            self._set_photo_list_icon(item, path)
+        if paths:
+            row = max(0, min(int(select or 0), len(paths) - 1))
+            self.image_list_widget.setCurrentRow(row)
+        self.btn_restore_list.setVisible(
+            getattr(self, "_photo_list_mode", "") == "similar")
+
+    def _set_photo_list_icon(self, item, path, size=110):
+        """列表行图标：缓存命中直接显示，未命中后台生成后回填（主线程回调）。"""
+        from core.thumbnail_cache import thumbnail_cache
+        local = self._resolve_display_path(path)
+        if not local:
+            return
+        size = max(24, int(size))
+        try:
+            cp = thumbnail_cache.get_cached(local, size)
+        except Exception:
+            cp = None
+        if cp:
+            try:
+                pix = QPixmap(cp)
+                if not pix.isNull():
+                    item.setIcon(QIcon(pix.scaled(
+                        size, size, Qt.KeepAspectRatio,
+                        Qt.SmoothTransformation)))
+                    return
+            except Exception:
+                pass
+
+        def _apply(cache_path, it=item, px=size):
+            if not cache_path:
+                return
+            try:
+                pix = QPixmap(cache_path)
+                if pix.isNull():
+                    return
+                it.setIcon(QIcon(pix.scaled(
+                    px, px, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
+            except Exception:
+                pass          # 列表已重建 → 旧 item 失效，忽略
+
+        try:
+            thumbnail_cache.request(local, size, None, _apply)
+        except Exception:
+            pass
+
+    def _restore_photo_list(self):
+        """退出相似搜索：恢复搜索前的照片列表与选中项。"""
+        backup = getattr(self, "_photo_list_backup", None)
+        if not backup:
+            self.btn_restore_list.hide()
+            self.statusBar().showMessage("没有可恢复的照片列表", 4000)
+            return
+        row = getattr(self, "_photo_list_backup_row", 0) or 0
+        self.image_list = list(backup)
+        self._photo_list_backup = None
+        self._photo_list_mode = ""
+        self._populate_photo_list(self.image_list, select=row)
+        self.show_preview(self.image_list_widget.currentRow())
+        self.statusBar().showMessage(
+            f"已返回全部照片（{len(self.image_list)} 张）", 5000)
+
     def _photo_roles_refs(self, path):
         """照片页反向查询：这张照片里的角色（先原样查，再标准化兜底）。"""
         refs = self._image_group_refs(path)
@@ -1777,6 +1868,10 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
             QMessageBox.information(self, "查找相似照片",
                                     "请先在照片页打开一张照片。")
             return
+        # 快照当前列表（已处于相似搜索模式则不覆盖快照，便于连续搜索后仍能返回）
+        if getattr(self, "_photo_list_mode", "") != "similar":
+            self._photo_list_backup = list(self.image_list or [])
+            self._photo_list_backup_row = self.image_list_widget.currentRow()
         self.statusBar().showMessage(
             "正在建立/更新视觉索引并搜索…（首次全量较慢，之后增量秒级）")
         w = _SimilarSearchWorker(path)
@@ -1797,19 +1892,13 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
                                     "没有找到相似照片（索引可能为空）。")
             return
         paths = [r["path"] for r in results]
+        labels = [os.path.basename(r["path"])
+                  + f"  · 相似 {r['similarity'] * 100:.0f}%"
+                  for r in results]
         self.image_list = paths
-        self.image_list_widget.clear()
-        for i, p in enumerate(paths):
-            item = QListWidgetItem(
-                os.path.basename(p)
-                + f"  · 相似 {results[i]['similarity'] * 100:.0f}%")
-            pix = QPixmap(p)
-            if not pix.isNull():
-                item.setIcon(QIcon(pix.scaled(
-                    110, 110, Qt.KeepAspectRatio, Qt.SmoothTransformation)))
-            self.image_list_widget.addItem(item)
-        self.image_list_widget.setCurrentRow(0)
-        self.show_preview(0)
+        self._photo_list_mode = "similar"
+        self._populate_photo_list(paths, select=0, labels=labels)
+        self.show_preview(self.image_list_widget.currentRow())
         self.statusBar().showMessage(
             f"找到 {len(paths)} 张相似照片（视觉搜索）", 8000)
 
@@ -1845,19 +1934,9 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
 
         self.image_list = images
         self._photo_detection_context = None
-        self.image_list_widget.clear()
-
-        for path in images:
-            item = QListWidgetItem(
-                os.path.basename(path)
-            )
-            pix, _ = self._load_pixmap_cached(path, QSize(110, 110))
-            if not pix.isNull():
-                icon = QIcon(
-                    pix.scaled(110, 110, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                )
-                item.setIcon(icon)
-            self.image_list_widget.addItem(item)
+        self._photo_list_mode = ""
+        self._photo_list_backup = None
+        self._populate_photo_list(images)
 
         self.statusBar().showMessage(
             f"加载完成，共 {len(images)} 张图片"
@@ -2333,17 +2412,7 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
                 in os.path.basename(p).lower()
             ]
 
-        for path in result:
-            item = QListWidgetItem(
-                os.path.basename(path)
-            )
-            pix, _ = self._load_pixmap_cached(path, QSize(110, 110))
-            if not pix.isNull():
-                icon = QIcon(
-                    pix.scaled(110, 110, Qt.KeepAspectRatio, Qt.SmoothTransformation)
-                )
-                item.setIcon(icon)
-            self.image_list_widget.addItem(item)
+        self._populate_photo_list(result)
 
         self.statusBar().showMessage(
             f"搜索完成：{len(result)} 张图片"

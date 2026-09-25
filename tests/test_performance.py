@@ -29,6 +29,7 @@ LIMIT_ROLE_PAGE_LOAD = 0.6      # 纯构建（无事件循环）
 LIMIT_STARTUP_INTERACTIVE = 2.5  # 构造 + show + 首帧
 LIMIT_SEARCH_INDEX = 0.3        # 搜索索引构建
 LIMIT_MD5_SCAN = 0.5            # 全库 MD5 扫描
+LIMIT_PHOTO_LIST = 1.0          # 照片列表填充（磁盘缩略图缓存优先）
 
 
 def settle(app, frames=8, dt=0.02):
@@ -87,7 +88,7 @@ class PerformanceGuardTests(unittest.TestCase):
             f"搜索索引 {elapsed:.2f}s 超限（{LIMIT_SEARCH_INDEX}s）")
 
     def test_md5_scan_within_budget(self):
-        """全库 MD5 重复扫描 ≤ 3s。"""
+        """全库 MD5 重复扫描 ≤ 0.5s。"""
         from core.duplicates import DuplicateScanner
         t0 = time.perf_counter()
         DuplicateScanner().scan()
@@ -95,6 +96,33 @@ class PerformanceGuardTests(unittest.TestCase):
         self.assertLess(
             elapsed, LIMIT_MD5_SCAN,
             f"MD5 扫描 {elapsed:.2f}s 超限（{LIMIT_MD5_SCAN}s）")
+
+    def test_photo_list_populate_within_budget(self):
+        """照片列表填充（全库，磁盘缩略图缓存优先）≤ 1.0s。
+
+        2026-09-25 前每行同步解码原图：162 张实测 5.5s 主线程卡顿；
+        改为 thumbnail_cache 优先 + 后台补图后 0.11s。
+        """
+        from ui.main_window_v3 import MainWindow
+        win = MainWindow()
+        win._ui_ready = True
+        win.show()
+        settle(self.app, 4)
+        photos_dir = os.path.join(os.path.dirname(
+            os.path.dirname(os.path.abspath(__file__))), "photos")
+        exts = (".jpg", ".jpeg", ".png", ".webp")
+        files = [os.path.join(photos_dir, n)
+                 for n in sorted(os.listdir(photos_dir))
+                 if os.path.splitext(n)[1].lower() in exts]
+        self.assertTrue(files, "photos/ 为空，无法测试照片列表填充")
+        t0 = time.perf_counter()
+        win._populate_photo_list(files)
+        elapsed = time.perf_counter() - t0
+        win.close()
+        self.assertLess(
+            elapsed, LIMIT_PHOTO_LIST,
+            f"照片列表填充 {elapsed:.2f}s 超限（{LIMIT_PHOTO_LIST}s）"
+            "——疑似退回逐行同步解码原图")
 
 
 if __name__ == "__main__":

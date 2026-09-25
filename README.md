@@ -295,10 +295,11 @@ QT_QPA_PLATFORM=offscreen C:/Program Files/Python310/python.exe -m unittest disc
 | 总览统计刷新（首次 / 热） | 0.04s / 0.01s |
 | 待处理页统计（热；冷启动含首次 import） | 0.02s / ~2s |
 | 全库重复扫描 `DuplicateScanner.scan()` | 0.02s |
+| 照片列表填充（全库 162 张，缓存优先 + 后台补图） | ~0.11s（改前 5.5s） |
 | 角色页 221 组卡片全量渲染（分批，不阻塞） | ~1.4s |
 | 常驻内存 RSS | ~136MB |
 
-性能护栏（`tests/test_performance.py`，2026-09-25 收紧）：启动可交互 ≤2.5s、角色页加载 ≤0.6s、搜索索引 ≤0.3s、全库 MD5 扫描 ≤0.5s。
+性能护栏（`tests/test_performance.py`，2026-09-25 收紧）：启动可交互 ≤2.5s、角色页加载 ≤0.6s、搜索索引 ≤0.3s、全库 MD5 扫描 ≤0.5s、照片列表填充 ≤1.0s。
 
 关键惰性点（改动前都是启动期同步开销）：
 
