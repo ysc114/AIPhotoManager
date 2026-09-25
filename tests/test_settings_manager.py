@@ -73,5 +73,11 @@ class SettingsManagerTests(unittest.TestCase):
             self.assertIsInstance(DEFAULT_SETTINGS[sec], dict)
 
 
+    def test_perf_mode_has_default(self):
+        """ui.perf_mode 有界面开关与读取方，默认值必须显式存在。"""
+        self.assertIn("perf_mode", self.sm.get("ui"))
+        self.assertFalse(bool(self.sm.get("ui.perf_mode")))
+
+
 if __name__ == "__main__":
     unittest.main()

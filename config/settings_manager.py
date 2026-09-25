@@ -40,15 +40,16 @@ DEFAULT_SETTINGS = {
         "animation_speed": 1.0,   # 动画速度/强度（0.5~2.0）
         "thumbnail_size": 138,    # 照片墙缩略图边长
         "grid_columns": 6,        # 每行照片数量
+        "perf_mode": False,       # ⚡ 性能模式：关闭极光/折射/阴影（角色页可一键切换）
         "rounded_photos": True,   # 圆角照片
         "show_photo_info": True,  # 显示照片信息
     },
 
     # ── 🧠 AI 识别 ──────────────────────────────────────────
     "ai": {
-        "l1_classifier": "clip",
-        "fursuit_engine": "fursee",   # 兽装识别引擎
-        "face_engine": "face",        # 人物识别引擎
+        "l1_classifier": "clip",      # 预留：当前链路固定走 CLIP，未读取
+        "fursuit_engine": "fursee",   # 预留：兽装引擎固定走 Fursee，未读取
+        "face_engine": "face",        # 预留：人物引擎固定走 Face，未读取
         "fursuit_threshold": 0.79,    # Fursee 匹配阈值（P-C4-C3 定稿）
         "face_threshold": 0.92,       # Face 匹配阈值
         "md5_dedup": True,            # MD5 内容去重
@@ -71,7 +72,7 @@ DEFAULT_SETTINGS = {
     "storage": {
         "photos_dir": "",             # 空 = 项目默认 photos/
         "data_dir": "",               # 空 = 项目根
-        "cache_dir": "",              # 空 = 项目根（analysis_cache.json 所在）
+        "cache_dir": "",              # 预留：缩略图/索引各自使用 cache/ 子目录
         "backup_dir": "backups",      # 相对项目根
     },
 
@@ -92,7 +93,7 @@ DEFAULT_SETTINGS = {
 
     # ── 🔍 AI 数据管理 ──────────────────────────────────────
     "data": {
-        "clean_invalid_cache": True,  # 清理无效缓存（空 {} 条目等）
+        "clean_invalid_cache": True,  # 预留：清理入口已在设置中心，独立于该键
         # 入库（分析/扫描新照片）完成后后台增量更新视觉搜索索引
         "auto_update_visual_index": True,
     },
