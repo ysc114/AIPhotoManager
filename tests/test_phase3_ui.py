@@ -77,6 +77,29 @@ class Phase3UiTests(unittest.TestCase):
         btns = [b.text() for b in self.window.photo_page.findChildren(QPushButton)]
         self.assertIn("⭐ 收藏当前", btns)
 
+    def test_settings_version_info_is_lazy(self):
+        """版本信息惰性填充：构造设置页不 spawn git、不连库；首次刷新才读。"""
+        from unittest import mock
+        from ui.settings_center import SettingsCenterPage
+        with mock.patch.object(SettingsCenterPage, "_git_commit",
+                               return_value="abc1234") as git, \
+                mock.patch.object(SettingsCenterPage, "_schema_version",
+                                  return_value=2) as schema:
+            page = SettingsCenterPage(win=None)
+            try:
+                self.assertFalse(git.called, "构造设置页不应调用 git")
+                self.assertFalse(schema.called, "构造设置页不应连库")
+                page.refresh_version_info()
+                self.assertEqual(git.call_count, 1)
+                labels = {k: v.text() for k, v in page._info_labels.items()}
+                self.assertIn("abc1234", labels["Git commit"])
+                self.assertIn("Schema v2", labels["数据库"])
+                # 第二次刷新复用缓存，不再 spawn git
+                page.refresh_version_info()
+                self.assertEqual(git.call_count, 1)
+            finally:
+                page.close()
+
 
 if __name__ == "__main__":
     unittest.main()

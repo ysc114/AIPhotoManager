@@ -64,6 +64,8 @@ class SettingsCenterPage(QWidget):
         self.win = win
         self._stats_cache = None   # (timestamp, stats) 统计结果缓存
         self._section_panels = []  # 玻璃面板注册表（参数修改后刷新）
+        self._info_labels = {}     # 关于区标签（惰性填版本信息）
+        self._version_cache = None # {"数据库": ..., "Git commit": ...} 惰性缓存
         self._build()
 
     # --------------------------------------------------------
@@ -834,8 +836,10 @@ class SettingsCenterPage(QWidget):
             ("UI 版本", "Liquid Glass 设置中心"),
             ("兽装识别", "Fursee（YOLO + 512D embedding）"),
             ("人物识别", "Face（InsightFace）"),
-            ("数据库", f"Schema v{self._schema_version()}"),
-            ("Git commit", self._git_commit()),
+            # 2026-09-25：这两项改为首次进入设置页惰性读取——原来构造时
+            # 就 spawn git 子进程 + 连库，纯属启动期无谓开销（实测 ~0.08s）
+            ("数据库", "…"),
+            ("Git commit", "…"),
             ("GitHub", "github.com/ysc114/AIPhotoManager"),
         ]
         for k, v in info:
@@ -845,6 +849,7 @@ class SettingsCenterPage(QWidget):
                 "border:1px solid rgba(255,255,255,0.6);border-radius:10px;padding:8px 12px;"
             )
             body.addWidget(lab)
+            self._info_labels[k] = lab
         self._db_status_label = QLabel("")
         self._db_status_label.setStyleSheet(
             "font-size:12px;color:#7c8ba0;background:transparent;border:none;"
@@ -952,6 +957,22 @@ class SettingsCenterPage(QWidget):
         self.refresh_data_stats()
         self._refresh_db_status()
         self.refresh_index_status()
+        self.refresh_version_info()
+
+    def refresh_version_info(self):
+        """惰性填充「关于」区版本信息（首次进入算一次，之后复用缓存）。"""
+        labels = getattr(self, "_info_labels", None)
+        if not labels:
+            return
+        if self._version_cache is None:
+            self._version_cache = {
+                "数据库": f"Schema v{self._schema_version()}",
+                "Git commit": self._git_commit(),
+            }
+        for key, value in self._version_cache.items():
+            lab = labels.get(key)
+            if lab is not None:
+                lab.setText(f"{key}：{value}")
 
     def refresh_data_stats(self):
         """读取数据库统计（只读，带 30s 结果缓存）。"""
