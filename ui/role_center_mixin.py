@@ -1095,6 +1095,8 @@ class _RoleCenterMixinMixin:
 
         # 整理命名入口：没有未命名角色时置灰
         self._sync_naming_btn(state)
+        # 疑似同一角色入口：0 候选时置灰（避免点开空页面）
+        self._sync_suspects_btn(state)
 
         if not groups:
             state["stats_label"].setText("暂无数据")
@@ -2139,6 +2141,32 @@ class _RoleCenterMixinMixin:
             f"还有 {len(unnamed)} 个未命名角色：逐个看封面直接命名\n"
             "回车=保存并下一个；只写名称，不动 detection/聚类"
             if unnamed else "当前没有未命名角色")
+
+    def _sync_suspects_btn(self, state):
+        """疑似同一角色按钮：显示待确认候选数；0 候选时置灰（避免空页面）。
+
+        候选计算为只读、约 40ms（组成员向量 → 组代表 → 两两余弦）。
+        """
+        btn = state.get("suspects_btn")
+        if btn is None:
+            return
+        try:
+            from core.identity import get_reader
+            n = len(get_reader().get_suspect_candidates() or [])
+        except Exception as e:
+            print(f"[疑似同一角色] 候选统计失败（保持可点）: {e}")
+            return
+        # 注意：按钮始终可点——该视图同时承载「撤销最近一次合并」，
+        # 0 候选时进去也要能撤销/重新统计，只是不显示数量。
+        btn.setEnabled(True)
+        if n > 0:
+            btn.setText(f"✨ 疑似同一角色（{n}）")
+            btn.setToolTip("跨角色组相似候选 · 人工确认后才合并\n"
+                           f"当前 {n} 对候选待确认")
+        else:
+            btn.setText("✨ 疑似同一角色")
+            btn.setToolTip("当前没有待确认的相似候选（已全部判定）\n"
+                           "仍可进入查看/撤销最近一次合并")
 
     def _open_naming_walkthrough(self, page_key="character"):
         """逐个命名未命名角色（人工确认；完成后刷新当前页）。"""

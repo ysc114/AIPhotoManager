@@ -93,5 +93,46 @@ class SuspectsUiSmokeTests(unittest.TestCase):
         self.assertEqual(self.state["page_stack"].currentIndex(), 2)
 
 
+    def test_toolbar_button_reflects_candidate_count(self):
+        """0 候选置灰并提示；有候选时显示数量且可点（避免点开空页面）。"""
+        from unittest import mock
+        btn = self.state["suspects_btn"]
+
+        class _StubMgr:
+            def __init__(self, n):
+                self._n = n
+
+            def get_suspect_candidates(self):
+                return [{}] * self._n
+
+            def close(self):
+                pass
+
+        with mock.patch("core.identity.get_reader",
+                        return_value=_StubMgr(0)):
+            self.win._sync_suspects_btn(self.state)
+        self.assertTrue(btn.isEnabled(), "始终可点：视图里还有撤销合并入口")
+        self.assertNotIn("（", btn.text(), "0 候选不显示数量")
+        self.assertIn("撤销", btn.toolTip())
+
+        with mock.patch("core.identity.get_reader",
+                        return_value=_StubMgr(3)):
+            self.win._sync_suspects_btn(self.state)
+        self.assertTrue(btn.isEnabled())
+        self.assertIn("（3）", btn.text(), "有候选应显示数量")
+
+    def test_toolbar_button_greys_out_on_real_data_when_no_candidates(self):
+        """真实库：候选为 0 时按钮应置灰（当前生产库即为此状态）。"""
+        from core.identity import get_reader
+        n = len(get_reader().get_suspect_candidates() or [])
+        self.win._sync_suspects_btn(self.state)
+        btn = self.state["suspects_btn"]
+        self.assertTrue(btn.isEnabled(), "真实库下按钮也应始终可点")
+        if n == 0:
+            self.assertNotIn("（", btn.text())
+        else:
+            self.assertIn(f"（{n}）", btn.text())
+
+
 if __name__ == "__main__":
     unittest.main()
