@@ -502,6 +502,8 @@ class SyncPollutionTests(unittest.TestCase):
         self.assertEqual(item["status"], STATUS_WARN)
         self.assertEqual(item["count"], 2, ".venv 内的不计入")
         self.assertIn(".git 内 1 个", item["detail"])
+        self.assertIn("其中 1 个在 .git/refs", item["detail"],
+                      "refs 内残留应单独点出（会破坏 git 引用解析）")
         self.assertIn("排除出", item["fix"])
 
 

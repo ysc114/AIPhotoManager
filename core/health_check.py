@@ -229,22 +229,29 @@ def run_health_check(photos_dir=None, db_path=None, analysis_cache_file=None,
 
     # ---- 云同步残留（百度网盘会在被同步目录里写 .cfg 占位文件）----
     try:
-        git_hits = other_hits = 0
+        git_hits = other_hits = refs_hits = 0
         for dirpath, dirnames, filenames in os.walk(root):
             if ".venv" in dirnames:
                 dirnames.remove(".venv")      # 依赖目录不统计，避免拖慢体检
-            in_git = (os.sep + ".git") in (dirpath + os.sep)
+            norm_dir = (dirpath + os.sep).replace("\\", "/")
+            in_git = "/.git/" in norm_dir
+            in_refs = in_git and "/refs/" in norm_dir
             for name in filenames:
                 if "baiduyun" in name and ("uploading.cfg" in name
                                            or "downloading" in name):
                     if in_git:
                         git_hits += 1
+                        if in_refs:
+                            refs_hits += 1
                     else:
                         other_hits += 1
         total_sync = git_hits + other_hits
         detail = (f"{total_sync} 个同步临时文件（.git 内 {git_hits} 个）"
                   if total_sync else "没有云同步残留文件")
-        if git_hits:
+        if refs_hits:
+            detail += (f"——其中 {refs_hits} 个在 .git/refs，"
+                       "已导致 git fsck/后台维护报错")
+        elif git_hits:
             detail += "——.git 被同步可能干扰 git 操作"
         items.append(_item(
             "sync_pollution", "云同步残留",
