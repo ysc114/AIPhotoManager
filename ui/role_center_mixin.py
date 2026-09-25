@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QLabel, QWidget, QFrame, QPushButton, QGridLayout,
 
 from config.settings_manager import settings as S
 from core.identity.naming import display_name as role_display_name
+from core.qt_threads import reap_thread
 from core.photo_quality.scorer import get_analyzer as get_pq_analyzer
 from ui.aurora_card import AuroraGlassCard
 from ui.components.glass_button import GlassButton
@@ -808,6 +809,8 @@ class _RoleCenterMixinMixin:
 
 
     def _on_scan_done(self, result):
+        reap_thread(getattr(self, "_scan_worker", None))
+        self._scan_worker = None
         state = self._group_pages.get(self._scan_worker_page)
         if state is not None:
             state["refresh_btn"].setEnabled(True)
@@ -828,6 +831,8 @@ class _RoleCenterMixinMixin:
 
 
     def _on_scan_failed(self, err):
+        reap_thread(getattr(self, "_scan_worker", None))
+        self._scan_worker = None
         state = self._group_pages.get(self._scan_worker_page)
         if state is not None:
             state["refresh_btn"].setEnabled(True)
@@ -1394,6 +1399,7 @@ class _RoleCenterMixinMixin:
         if state is None:
             return
         state["ai_reanalyze"].setEnabled(True)
+        reap_thread(state.get("pq_worker"))
         state["pq_worker"] = None
         if result is None:
             state["ai_status"].setText("分析失败，请重试")
@@ -1665,6 +1671,7 @@ class _RoleCenterMixinMixin:
 
 
     def _on_ai_pick_all_done(self, role_key, result):
+        reap_thread(getattr(self, "_ai_pick_worker", None))
         self.ai_pick_start_btn.setEnabled(True)
         self._ai_pick_worker = None
         if result is None:

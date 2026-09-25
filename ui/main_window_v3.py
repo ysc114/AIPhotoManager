@@ -1296,6 +1296,7 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         self._pending_status.setText(f"({current}/{total}) {status}")
 
     def _on_analyze_done(self, result):
+        self._reap_worker(getattr(self, "_pending_worker", None))
         self._pending_analyze_btn.setEnabled(True)
         self._pending_progress.setValue(self._pending_progress.maximum())
         self._pending_status.setText("分析完成")
@@ -1316,6 +1317,7 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
             self._update_visual_index_async()
 
     def _on_analyze_failed(self, err):
+        self._reap_worker(getattr(self, "_pending_worker", None))
         self._pending_analyze_btn.setEnabled(True)
         self._pending_worker = None
         self._pending_status.setText("分析失败")
@@ -1615,11 +1617,8 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
     @staticmethod
     def _reap_worker(worker):
         """等后台线程真正退出后再丢引用（避免 QThread 析构时仍在运行）。"""
-        try:
-            if worker is not None and worker.isRunning():
-                worker.wait(3000)
-        except Exception:
-            pass
+        from core.qt_threads import reap_thread
+        return reap_thread(worker)
 
     def _update_visual_index_async(self):
         """入库完成后台增量更新视觉索引。
@@ -1791,6 +1790,7 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         self.statusBar().showMessage(f"视觉索引 {cur}/{total}…", 1000)
 
     def _on_similar_done(self, results):
+        self._reap_worker(getattr(self, "_similar_worker", None))
         self._similar_worker = None
         if not results:
             QMessageBox.information(self, "查找相似照片",
@@ -1814,6 +1814,7 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
             f"找到 {len(paths)} 张相似照片（视觉搜索）", 8000)
 
     def _on_similar_failed(self, err):
+        self._reap_worker(getattr(self, "_similar_worker", None))
         self._similar_worker = None
         QMessageBox.critical(self, "查找相似照片失败", str(err))
 

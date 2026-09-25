@@ -23,6 +23,7 @@ from PySide6.QtWidgets import (
 
 from core.duplicates import DuplicateScanner, DuplicateCleaner
 from core.visual_duplicates import VisualDuplicateIndex
+from core.qt_threads import reap_thread
 from core.thumbnail_cache import thumbnail_cache
 from config.settings_manager import settings as S
 
@@ -258,12 +259,14 @@ class DuplicatesPage(QWidget):
         self._visual_stats.setText(f"检测中… {done}/{total}")
 
     def _on_visual_done(self, groups):
+        reap_thread(self._visual_worker)
         self._visual_worker = None
         self._visual_btn.setEnabled(True)
         self._visual_groups = groups or []
         self._rebuild()
 
     def _on_visual_failed(self, err):
+        reap_thread(self._visual_worker)
         self._visual_worker = None
         self._visual_btn.setEnabled(True)
         self._visual_stats.setText("检测失败")
