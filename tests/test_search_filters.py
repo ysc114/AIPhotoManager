@@ -13,7 +13,6 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PySide6.QtWidgets import QApplication
 from PySide6.QtCore import Qt, QDate
-from config.settings_manager import settings as S
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 

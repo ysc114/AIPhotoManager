@@ -78,7 +78,6 @@ class FurseeWorker:
         log(f"cut.pt (YOLO) loaded in {time.perf_counter() - t0:.2f}s")
 
         t1 = time.perf_counter()
-        import torch.nn as nn
         from safetensors.torch import load_file
         from transformers import AutoImageProcessor, AutoModel
         logging.getLogger("transformers").setLevel(logging.ERROR)

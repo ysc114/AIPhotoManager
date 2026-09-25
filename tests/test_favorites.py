@@ -7,7 +7,6 @@ import os
 import tempfile
 import shutil
 import unittest
-from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication

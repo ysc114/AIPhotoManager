@@ -86,7 +86,6 @@ class ClipImageEncoder:
         with self._lock:
             if self._model is not None:
                 return
-            import torch
             import open_clip
             self.device = resolve_device(self.requested_device)
             model, _, preprocess = open_clip.create_model_and_transforms(
@@ -144,7 +143,6 @@ class ClipImageEncoder:
     def encode_batch(self, paths, normalize=True, progress_cb=None):
         """批量编码（单次前向，比逐张调用快）。失败项返回 None。"""
         self._ensure_loaded()
-        import torch
         out = []
         for i, p in enumerate(paths):
             try:

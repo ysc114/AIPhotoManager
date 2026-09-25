@@ -161,7 +161,7 @@ def compute_fingerprint(path):
         md5 = hashlib.md5(data).hexdigest()
         img = Image.open(io.BytesIO(data))
         img.load()
-    except (OSError, ValueError) as e:
+    except (OSError, ValueError):
         return None
     try:
         tech = technical_metrics(img)

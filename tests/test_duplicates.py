@@ -107,7 +107,6 @@ class DuplicateCleanerTests(unittest.TestCase):
         shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def setUp(self):
-        import importlib
         self.patches = []
         # mock IdentityManager 数据库清理（避免触碰生产库）
         from unittest import mock
@@ -138,7 +137,6 @@ class DuplicateCleanerTests(unittest.TestCase):
         self.assertFalse(os.path.exists(self.a1), "副本文件应被删除")
         self.assertTrue(os.path.exists(self.a), "保留文件不受影响")
         # 数据库清理被调用（remove_image / remove_favorite / 缓存 remove）
-        from unittest import mock
         import core.identity as ident
         mgr = ident.IdentityManager.return_value
         mgr.db.remove_image.assert_called_with(self.a1.replace("\\", "/"))
@@ -174,7 +172,7 @@ class DuplicateCleanerTests(unittest.TestCase):
         # 试图删掉组内全部副本 → keep_md5 集合本身仍允许（安全校验不拦），
         # 但 UI 层每组保留 1 个由 _ensure_keep_one 保证；此处验证删除后
         # 至少一个副本仍在（只删 a1）。
-        result = cleaner.delete_paths([self.a1], keep_md5_set=keep_md5)
+        cleaner.delete_paths([self.a1], keep_md5_set=keep_md5)
         self.assertTrue(os.path.exists(self.a))
         _make_photo(self.tmp, "a (1).jpg")
 

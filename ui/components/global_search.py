@@ -17,7 +17,7 @@ global_search.py —— 全局搜索面板（Spotlight / macOS 风格 · 路线�
 """
 
 from PySide6.QtCore import Qt, QTimer, Signal, QVariantAnimation, QEasingCurve, QRectF, QPointF
-from PySide6.QtGui import QPainter, QColor, QLinearGradient, QRadialGradient, QPen, QFont
+from PySide6.QtGui import QPainter, QColor, QLinearGradient, QRadialGradient, QPen
 from PySide6.QtWidgets import (
     QWidget, QLineEdit, QLabel, QHBoxLayout, QVBoxLayout, QScrollArea, QFrame,
     QGraphicsDropShadowEffect,

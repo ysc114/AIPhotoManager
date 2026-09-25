@@ -3,8 +3,6 @@
 全部使用 temp 临时照片与临时索引文件，不触碰生产照片库。
 """
 import json
-import math
-import os
 import tempfile
 import unittest
 from pathlib import Path

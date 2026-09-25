@@ -1,6 +1,5 @@
 """SettingsManager 配置管理单元测试（temp 文件隔离，不碰生产配置）。"""
 
-import json
 import os
 import tempfile
 import unittest

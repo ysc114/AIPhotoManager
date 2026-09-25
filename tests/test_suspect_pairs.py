@@ -11,7 +11,6 @@ from pathlib import Path
 
 import numpy as np
 
-from core.identity.database import IdentityDatabase
 from core.identity.manager import IdentityManager
 from core.identity.suspects import (
     SuspectStore,
@@ -142,11 +141,11 @@ class SuspectPairCoreTests(unittest.TestCase):
 
     def test_multi_member_group_uses_normalized_centroid(self):
         """组代表 = mean → L2 归一化（与 incremental_assign 同口径）。"""
-        g1 = self._mk_group(
+        self._mk_group(
             emb=_unit_vec(1.0),
             paths=["a1.jpg", "a2.jpg"],  # 同向量 → 代表仍是 e0
         )
-        g2 = self._mk_group(emb=_unit_vec(0.75), paths=["b.jpg"])
+        self._mk_group(emb=_unit_vec(0.75), paths=["b.jpg"])
         cands = self.mgr.get_suspect_candidates()
         self.assertEqual(len(cands), 1)
         self.assertAlmostEqual(cands[0]["similarity"], 0.75, places=4)

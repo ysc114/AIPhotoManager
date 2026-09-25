@@ -33,7 +33,7 @@ class AIClassifier:
                 from core.yolo_detector import crop_from_bbox
                 self.yolo_detector = get_model_hub().get_yolo()
                 self.crop_func = crop_from_bbox
-                print(f"[YOLO] 加载成功 (YOLO-World, ModelHub 共享)")
+                print("[YOLO] 加载成功 (YOLO-World, ModelHub 共享)")
             except ImportError as e:
                 print(f"[YOLO] 不可用: {e}")
                 self.use_yolo = False

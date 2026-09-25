@@ -7,19 +7,12 @@ overview_mixin —— MainWindow 页面方法拆分（纯移动，方法体零�
 import json
 import os
 
-from PySide6.QtCore import Qt, QTimer, QRectF, QPointF, QSize, QPoint, QEvent
+from PySide6.QtCore import Qt, QPoint, QEvent
 from PySide6.QtCore import QPropertyAnimation, QEasingCurve
-from PySide6.QtGui import QPixmap, QColor, QFont, QPainter, QImage, QIcon
-from PySide6.QtWidgets import (
-    QLabel, QWidget, QFrame, QPushButton, QGridLayout, QVBoxLayout,
-    QHBoxLayout, QMessageBox, QMenu, QScrollArea, QStackedWidget, QLineEdit,
-    QComboBox, QFileDialog, QListWidget, QListWidgetItem, QSplitter,
-    QInputDialog, QDialog, QDialogButtonBox, QAbstractItemView,
-    QGraphicsOpacityEffect, QGraphicsDropShadowEffect,
-)
+from PySide6.QtGui import QPixmap, QColor, QIcon
+from PySide6.QtWidgets import QLabel, QWidget, QFrame, QPushButton, QGridLayout, QVBoxLayout, QHBoxLayout, QMessageBox, QMenu, QListWidget, QListWidgetItem, QInputDialog, QDialog, QDialogButtonBox, QAbstractItemView, QGraphicsOpacityEffect, QGraphicsDropShadowEffect
 
 from config.settings_manager import settings as S
-from core.thumbnail_cache import thumbnail_cache
 
 
 class _OverviewMixinMixin:

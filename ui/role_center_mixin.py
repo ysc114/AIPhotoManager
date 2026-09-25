@@ -6,22 +6,13 @@ role_center_mixin —— MainWindow 页面方法拆分（纯移动，方法体�
 
 import json
 import os
-import time
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, QRectF, QPointF, QSize, QPoint, QEvent, QRect, QThread
-from PySide6.QtGui import (
-    QPixmap, QColor, QFont, QPainter, QImage, QPen,
-    QImageReader, QImageIOHandler, QFontMetrics,
-)
-from PySide6.QtWidgets import (
-    QLabel, QWidget, QFrame, QPushButton, QGridLayout, QVBoxLayout,
-    QHBoxLayout, QMessageBox, QScrollArea, QStackedWidget, QLineEdit,
-    QComboBox, QFileDialog, QListWidget, QSplitter, QInputDialog,
-)
+from PySide6.QtCore import Qt, QTimer, QSize, QRect
+from PySide6.QtGui import QPixmap, QColor, QPainter, QPen, QImageReader, QImageIOHandler, QFontMetrics
+from PySide6.QtWidgets import QLabel, QWidget, QFrame, QPushButton, QGridLayout, QVBoxLayout, QHBoxLayout, QMessageBox, QScrollArea, QStackedWidget
 
 from config.settings_manager import settings as S
-from core.thumbnail_cache import thumbnail_cache
 from core.photo_quality.scorer import get_analyzer as get_pq_analyzer
 from ui.aurora_card import AuroraGlassCard
 from ui.components.glass_button import GlassButton

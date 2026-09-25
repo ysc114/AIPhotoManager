@@ -10,7 +10,6 @@ import tempfile
 import shutil
 import unittest
 from unittest import mock
-from pathlib import Path
 
 from core.identity.manager import IdentityManager
 
@@ -158,7 +157,7 @@ class AnalyzePathsTests(unittest.TestCase):
         self._patch(route_map={p: fake_l1("fursuit")})
         with mock.patch.object(self.mgr.cluster, "incremental_assign") as m:
             m.return_value = {"joined": 0, "created": 1, "conflicts": []}
-            r = self.mgr.analyze_paths([p])
+            self.mgr.analyze_paths([p])
         self.assertEqual(m.call_count, 2, "应调用 fursee + face 两次增量")
         kinds = [c.kwargs.get("embedding_type") or c.args[0] for c in m.call_args_list]
         self.assertIn("fursuit_fursee", kinds)

@@ -1,6 +1,5 @@
 import os
 import sys
-import json
 from pathlib import Path
 from datetime import datetime
 
@@ -11,18 +10,13 @@ if str(_project_root) not in sys.path:
 
 from config.settings_manager import settings as S
 from ui.settings_center import SettingsCenterPage
-from ui.aurora_card import AuroraGlassCard
 
 
-from PySide6.QtCore import Qt, QSize, QTimer, QRect, QPoint, QThread, Signal
+from PySide6.QtCore import Qt, QSize, QTimer, QPoint, QThread, Signal
 from PySide6.QtGui import (
     QIcon,
     QPixmap,
-    QPainter,
     QColor,
-    QPen,
-    QImageReader,
-    QImageIOHandler,
     QLinearGradient,
     QBrush,
 )
@@ -48,7 +42,6 @@ from PySide6.QtWidgets import (
     QGraphicsDropShadowEffect,
     QSplitter,
     QStackedWidget,
-    QGridLayout,
 )
 
 
@@ -56,10 +49,7 @@ from core.image_loader import load_images_from_folder
 from core.ai_classifier import AIClassifier
 from core.ai_advisor import AIAdvisor
 from core.thumbnail_cache import thumbnail_cache
-from core.photo_quality.scorer import get_analyzer as get_pq_analyzer
 from ui.bottom_nav import BottomGlassNav
-from ui.components.glass_button import GlassButton
-from ui.components.toast import toast
 from ui.search_bar import GlassSearchBar
 from ui.role_center_mixin import _RoleCenterMixinMixin
 # 页面模块方法被拆分到以下 Mixin（main_window_v3.py 仅保留组装）

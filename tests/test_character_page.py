@@ -7,12 +7,11 @@ import os
 import tempfile
 import shutil
 import unittest
-from unittest import mock
 from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
-from PySide6.QtWidgets import QApplication, QLabel
+from PySide6.QtWidgets import QApplication
 
 from ui.main_window_v3 import MainWindow
 from core.identity.manager import IdentityManager

@@ -45,7 +45,6 @@ class VendorPyGlassTests(unittest.TestCase):
         """PySide6 memoryview 兼容：QImage → ndarray → QImage。"""
         from ui.vendor.pyglass.refract import qimage_to_array, array_to_qimage
         from PySide6.QtGui import QImage
-        import numpy as np
         img = QImage(80, 60, QImage.Format.Format_RGBA8888)
         img.fill(0x11223344)
         arr = qimage_to_array(img)

@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PySide6.QtWidgets import QApplication
-from PySide6.QtCore import Qt, QPoint, QVariantAnimation
+from PySide6.QtCore import Qt, QPoint
 from PySide6.QtTest import QTest
 
 from config.settings_manager import settings as S
@@ -78,7 +78,7 @@ class BottomNavTests(unittest.TestCase):
             self.assertIn(key, _PATH_BUILDERS,
                           f"导航项「{name}」({key}) 缺少自绘图标")
         # 新图标可绘制（不抛异常）
-        nav = self._nav()
+        self._nav()
         from PySide6.QtGui import QPixmap, QPainter, QColor
         pm = QPixmap(64, 64)
         pm.fill(Qt.transparent)
