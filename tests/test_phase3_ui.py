@@ -19,6 +19,8 @@ class Phase3UiTests(unittest.TestCase):
 
     def tearDown(self):
         self.window.close()
+        self.window.deleteLater()   # 让 Qt 在 QApplication 存活时析构，
+        self.app.processEvents()    # 避免退出期原生崩溃（0xC0000409）
 
     def test_favorites_page_built(self):
         self.assertTrue(hasattr(self.window, "favorites_page"))
@@ -140,6 +142,121 @@ class Phase3UiTests(unittest.TestCase):
         finally:
             win.duplicates_page.refresh = orig
         self.assertEqual(len(calls), 2, f"应恰好扫描 2 次，实际 {len(calls)}")
+
+    def test_photo_actions_use_latest_preview(self):
+        """回归：AI 分析 A 后切到 B，同框角色/相似搜索应针对 B。"""
+        from pathlib import Path
+        from unittest import mock
+        import ui.main_window_v3 as mw
+
+        photos = sorted((Path(__file__).resolve().parents[1] / "photos").glob("*.png"))
+        if len(photos) < 2:
+            self.skipTest("photos/ 不足两张 PNG")
+        a, b = str(photos[0]), str(photos[1])
+
+        win = self.window
+        win.image_list = [a, b]
+        win.current_image_path = a          # 模拟刚分析过 A 的残留状态
+        win._populate_photo_list([a, b], select=1)
+        win.show_preview(1)
+        self.app.processEvents()
+        self.assertEqual(win._current_photo_path(), b.replace("\\", "/"))
+
+        roles_seen = []
+        win._photo_roles_refs = lambda p: (roles_seen.append(p), [])[1]
+        try:
+            win._show_photo_roles()          # refs 为空 → 只刷状态栏
+        finally:
+            del win._photo_roles_refs
+        self.assertEqual(len(roles_seen), 1)
+        self.assertEqual(os.path.basename(roles_seen[0]), os.path.basename(b),
+                         "应查询当前预览的 B")
+
+        sim_seen = []
+
+        class _Sig:
+            def connect(self, *_args, **_kwargs):
+                pass
+
+        class _FakeWorker:
+            def __init__(self, p):
+                sim_seen.append(p)
+                self.progress_updated = _Sig()
+                self.done_sig = _Sig()
+                self.failed = _Sig()
+
+            def start(self):
+                pass
+
+            def isRunning(self):
+                return False
+
+        with mock.patch.object(mw, "_SimilarSearchWorker", _FakeWorker):
+            win._find_similar_photos()
+        self.assertEqual(len(sim_seen), 1)
+        self.assertEqual(os.path.basename(sim_seen[0]), os.path.basename(b),
+                         "相似搜索种子应是当前预览的 B")
+
+    def test_submit_feedback_rejects_switched_photo(self):
+        """回归：分析 A 后切到 B 再提交 → 拒绝，不污染反馈数据。"""
+        from pathlib import Path
+        from unittest import mock
+
+        photos = sorted((Path(__file__).resolve().parents[1] / "photos").glob("*.png"))
+        if len(photos) < 2:
+            self.skipTest("photos/ 不足两张 PNG")
+        a, b = str(photos[0]), str(photos[1])
+
+        win = self.window
+        win.image_list = [a, b]
+        win._populate_photo_list([a, b], select=1)
+        win.show_preview(1)
+        self.app.processEvents()
+        win.current_image_path = a          # 刚分析的是 A
+        win.current_ai_category = "人物"
+        combo = mock.MagicMock()          # 轻量桩：避免无父 Qt 对象析构崩溃
+        combo.currentText.return_value = "人物"
+        win.feedback_combo = combo
+
+        saved = []
+        win.advisor.save_feedback = lambda *args: saved.append(args)
+        win.start_ai_analysis = lambda: None
+
+        with mock.patch("ui.main_window_v3.QMessageBox") as box:
+            win.submit_feedback()
+            self.assertEqual(saved, [], "切换照片后不得写入反馈")
+            self.assertTrue(box.information.called, "应给出明确提示")
+
+            win.show_preview(0)             # 回到 A → 同一张，允许提交
+            self.app.processEvents()
+            win.submit_feedback()
+            self.assertEqual(len(saved), 1, "同一张照片应允许提交")
+            self.assertTrue(str(saved[0][0]).endswith(os.path.basename(a)))
+
+    def test_close_waits_background_workers(self):
+        """回归：关窗应等后台线程结束（QThread 未结束退出会崩）。"""
+        from PySide6.QtCore import QThread
+
+        class _Slow(QThread):
+            def run(self):
+                self.msleep(600)
+
+        win = self.window
+        slow = _Slow(win)
+        win._health_worker = slow
+        slow.start()
+        self.assertTrue(slow.isRunning())
+        win.close()
+        self.assertFalse(slow.isRunning(), "关窗应等到线程结束")
+        self.assertIsNone(getattr(win, "_health_worker", None))
+
+    def test_no_health_check_after_close(self):
+        """回归：关窗后延时定时器不得再启动后台体检线程。"""
+        win = self.window
+        win.close()
+        win._startup_health_check()          # 模拟 2.5s 延时定时器晚到
+        self.assertIsNone(getattr(win, "_health_worker", None),
+                          "关窗后不应再启动体检线程")
 
 
 if __name__ == "__main__":

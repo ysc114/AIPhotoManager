@@ -184,6 +184,8 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
 
     def _startup_health_check(self):
         """启动后后台体检一次（幂等；测试无事件循环 → 不触发）。"""
+        if not getattr(self, "_ui_ready", False):
+            return                 # 已关窗：不再启动后台体检
         w = getattr(self, "_health_worker", None)
         if w is not None and w.isRunning():
             return
@@ -1659,6 +1661,32 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         from core.qt_threads import reap_thread
         return reap_thread(worker)
 
+    # 关窗前必须停掉的后台线程（QThread 未结束就退出 → Windows 0xC0000409）
+    _BG_WORKER_ATTRS = (
+        "_health_worker", "_pending_worker", "_visual_index_worker",
+        "_sem_worker", "_similar_worker", "_scan_worker", "_ai_pick_worker",
+    )
+
+    def _shutdown_background_workers(self, timeout_ms=3000):
+        """停掉自己启动的后台线程（等不到就放弃，不阻断关窗）。"""
+        self._ui_ready = False
+        for name in self._BG_WORKER_ATTRS:
+            worker = getattr(self, name, None)
+            if worker is None:
+                continue
+            try:
+                if worker.isRunning():
+                    worker.requestInterruption()
+                    worker.wait(int(timeout_ms))
+            except Exception:
+                pass
+            setattr(self, name, None)
+
+    def closeEvent(self, event):
+        """关窗：先收尾后台线程，避免退出期原生崩溃。"""
+        self._shutdown_background_workers()
+        super().closeEvent(event)
+
     def _update_visual_index_async(self):
         """入库完成后台增量更新视觉索引。
 
@@ -1874,7 +1902,7 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
 
     def _show_photo_roles(self):
         """照片页：列出当前预览照片里的角色，选中即跳转该角色详情页。"""
-        path = self.current_image_path
+        path = self._current_photo_path()
         if not path and self.image_list:
             row = self.image_list_widget.currentRow()
             path = (self.image_list[row]
@@ -1908,7 +1936,7 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
             self.statusBar().showMessage(
                 "视觉索引正在更新，请稍候几秒再试…", 5000)
             return
-        path = self.current_image_path
+        path = self._current_photo_path()
         if not path and self.image_list:
             row = self.image_list_widget.currentRow()
             path = self.image_list[row] if 0 <= row < len(self.image_list) \
@@ -2419,9 +2447,31 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
                 str(e)
             )
 
+    @staticmethod
+    def _same_photo(p1, p2):
+        """两个路径是否指向同一张照片（容忍斜杠方向混用、相对/绝对路径）。"""
+        def _abs(v):
+            s = str(v or "").replace("/", os.sep)
+            if s and not os.path.isabs(s):
+                s = os.path.join(str(_project_root), s)
+            return os.path.normcase(os.path.normpath(s))
+
+        if not p1 or not p2:
+            return False
+        return _abs(p1) == _abs(p2)
+
+
     def submit_feedback(self):
         if not self.current_image_path:
             QMessageBox.warning(self, "提示", "没有可反馈的图片")
+            return
+
+        # 防止「分析 A 后切到 B 再提交」把 A 的分类写到 B 上
+        shown = self._current_photo_path()
+        if shown and not self._same_photo(shown, self.current_image_path):
+            QMessageBox.information(
+                self, "提示",
+                "当前显示的不是刚才分析的照片，请重新运行 AI 分析后再提交反馈。")
             return
 
         human_category = self.feedback_combo.currentText()
