@@ -16,15 +16,17 @@ CACHE_FILE = str(Path(__file__).resolve().parents[1] / "analysis_cache.json")
 class AnalysisCache:
     """分析结果缓存（内存 + 磁盘）"""
 
-    def __init__(self):
+    def __init__(self, cache_file=None):
+        # cache_file 显式传入时只读写该路径（测试隔离；避免误写生产缓存）
+        self.cache_file = str(cache_file) if cache_file else CACHE_FILE
         self._cache = {}
         self._load_from_disk()
 
     def _load_from_disk(self):
         """从磁盘加载缓存"""
-        if os.path.exists(CACHE_FILE):
+        if os.path.exists(self.cache_file):
             try:
-                with open(CACHE_FILE, "r", encoding="utf-8") as f:
+                with open(self.cache_file, "r", encoding="utf-8") as f:
                     self._cache = json.load(f)
                 print(f"[缓存] 从磁盘加载 {len(self._cache)} 条记录")
             except (json.JSONDecodeError, IOError):
@@ -32,7 +34,7 @@ class AnalysisCache:
 
     def _save_to_disk(self):
         """保存缓存到磁盘"""
-        with open(CACHE_FILE, "w", encoding="utf-8") as f:
+        with open(self.cache_file, "w", encoding="utf-8") as f:
             json.dump(self._cache, f, ensure_ascii=False, indent=2)
 
     def get(self, image_path):
@@ -73,8 +75,8 @@ class AnalysisCache:
     def clear(self):
         """清空缓存"""
         self._cache.clear()
-        if os.path.exists(CACHE_FILE):
-            os.remove(CACHE_FILE)
+        if os.path.exists(self.cache_file):
+            os.remove(self.cache_file)
 
     def get_category_cn(self, image_path):
         """获取人工修正后的分类中文名"""
@@ -91,6 +93,26 @@ class AnalysisCache:
             self._save_to_disk()
             return True
         return False
+
+    def stale_count(self):
+        """指向已不存在文件的条目数（含空条目；只读，不写盘）。"""
+        return sum(1 for k, v in self._cache.items()
+                   if not v or (k and not os.path.exists(k)))
+
+    def prune_missing(self):
+        """删除失效缓存条目（文件已删除 / 空条目），返回统计。
+
+        只清理缓存自身的键，不删除任何照片文件；下次分析会自动重建。
+        """
+        stale = [k for k in list(self._cache) if k and not os.path.exists(k)]
+        empty = [k for k, v in list(self._cache.items()) if not v]
+        removed = set(stale) | set(empty)
+        for k in removed:
+            self._cache.pop(k, None)
+        if removed:
+            self._save_to_disk()
+        return {"stale": len(stale), "empty": len(empty),
+                "removed": len(removed), "kept": len(self._cache)}
 
     def set_category_cn(self, image_path, category_cn):
         """设置人工修正后的分类名"""

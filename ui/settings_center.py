@@ -11,7 +11,6 @@ AIPhotoManager 设置中心（Settings Center）
 AI 数据统计在 refresh() 时惰性读取。
 """
 
-import json
 import os
 import shutil
 import sqlite3
@@ -679,7 +678,7 @@ class SettingsCenterPage(QWidget):
         btn_row.setSpacing(10)
         btn_row.addWidget(self._glass_btn("🔄 刷新统计", ("#6fb7f5", "#9b8cf0"), self.refresh_data_stats))
         btn_row.addWidget(self._glass_btn("📡 重新扫描新照片", ("#57c78a", "#6aaee8"), self._rescan))
-        btn_row.addWidget(self._glass_btn("🧹 清理无效缓存", ("#c29ae8", "#9b8cf0"), self._clean_cache))
+        btn_row.addWidget(self._glass_btn("🧹 清理失效缓存", ("#c29ae8", "#9b8cf0"), self._clean_cache))
         btn_row.addStretch(1)
         body.addLayout(btn_row)
 
@@ -981,7 +980,8 @@ class SettingsCenterPage(QWidget):
             f"Fursee detection：{stats['fursee_det']} ｜ Fursee 角色：{stats['fursee_groups']}\n"
             f"Face 人物：{stats['face']} ｜ 已分析照片：{stats['analyzed']}\n"
             f"未分析照片：{stats['unanalyzed']} ｜ photos/ 图片：{stats['photos_total']}\n"
-            f"重复副本（磁盘，未入库）：{stats['dup_disk']}"
+            f"重复副本（磁盘，未入库）：{stats['dup_disk']} ｜ "
+            f"失效缓存：分析 {stats['stale_analysis']} 条 · 视觉指纹 {stats['stale_visual']} 条"
         )
 
     def _collect_stats(self):
@@ -992,7 +992,19 @@ class SettingsCenterPage(QWidget):
         out = {
             "fursee_det": 0, "fursee_groups": 0, "face": 0,
             "analyzed": 0, "unanalyzed": 0, "photos_total": 0, "dup_disk": 0,
+            "stale_analysis": 0, "stale_visual": 0,
         }
+        # 失效缓存条数（只读；指向已删除照片的键）
+        try:
+            from core.analysis_cache import get_cache
+            out["stale_analysis"] = get_cache().stale_count()
+        except Exception:
+            pass
+        try:
+            from core.visual_duplicates import VisualDuplicateIndex
+            out["stale_visual"] = VisualDuplicateIndex().stale_count()
+        except Exception:
+            pass
         db_path = _project_path("identity_db.sqlite")
         try:
             con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
@@ -1151,26 +1163,36 @@ class SettingsCenterPage(QWidget):
             self._backup_status.setText("无法触发扫描（主窗口未就绪）。")
 
     def _clean_cache(self):
-        """清理 analysis_cache.json 中的无效空条目（{} / null）。"""
-        cache_path = _project_path("analysis_cache.json")
-        if not os.path.exists(cache_path):
-            self._backup_status.setText("analysis_cache.json 不存在。")
+        """清理失效缓存：文件已删除的分析缓存条目 + 视觉指纹记录。
+
+        只删缓存里的键（下次分析/扫描会重建），不删除任何照片文件；
+        人工的「不是同一角色 / 保留此张」判定保持不变。
+        """
+        from core.analysis_cache import get_cache
+        from core.visual_duplicates import VisualDuplicateIndex
+        cache = get_cache()
+        visual = VisualDuplicateIndex()
+        n_analysis = cache.stale_count()
+        n_visual = visual.stale_count()
+        if not n_analysis and not n_visual:
+            self._backup_status.setText("✅ 没有失效缓存需要清理。")
             return
         ret = QMessageBox.question(
-            self, "清理无效缓存",
-            "将删除 analysis_cache.json 中的空缓存条目（{} 等），\n"
-            "这些照片下次分析时会重新分类。继续？",
+            self, "清理失效缓存",
+            f"将清理指向已删除照片的缓存条目：\n"
+            f"· 分析缓存 {n_analysis} 条（下次分析会重新分类）\n"
+            f"· 视觉指纹 {n_visual} 条（重复检测会按需重算）\n\n"
+            f"不会删除任何照片文件，也不会改动人工判定。继续？",
         )
         if ret != QMessageBox.Yes:
             return
         try:
-            with open(cache_path, "r", encoding="utf-8") as f:
-                cache = json.load(f)
-            bad = [k for k, v in cache.items() if not v]
-            for k in bad:
-                cache.pop(k, None)
-            with open(cache_path, "w", encoding="utf-8") as f:
-                json.dump(cache, f, ensure_ascii=False, indent=2)
-            self._backup_status.setText(f"✅ 已清理 {len(bad)} 条无效缓存。")
+            r1 = cache.prune_missing()
+            r2 = visual.prune_missing()
+            self._stats_cache = None        # 让统计立即反映清理结果
+            self.refresh_data_stats()
+            self._backup_status.setText(
+                f"✅ 已清理：分析缓存 {r1['removed']} 条 · "
+                f"视觉指纹 {r2['missing']} 条（保留 {r2['kept']} 条指纹）")
         except Exception as e:
             self._backup_status.setText(f"❌ 清理失败：{e}")

@@ -218,6 +218,22 @@ class VisualDuplicateIndex:
         self._ignored = data.get("ignored") or []
         self._resolved = data.get("resolved") or {}
 
+    def stale_count(self):
+        """指纹记录中指向已不存在文件的数量（只读）。"""
+        return sum(1 for k in self._files if not os.path.exists(k))
+
+    def prune_missing(self):
+        """删除指向已删除照片的指纹记录（保留人工忽略/保留判定）。
+
+        只清理缓存，不动任何照片文件；重新出现的新文件会重新计算指纹。
+        """
+        gone = [k for k in list(self._files) if not os.path.exists(k)]
+        for k in gone:
+            self._files.pop(k, None)
+        if gone:
+            self.save()
+        return {"missing": len(gone), "kept": len(self._files)}
+
     def save(self):
         data = self._data()
         directory = os.path.dirname(os.path.abspath(self.index_path)) or "."
