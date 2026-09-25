@@ -165,6 +165,28 @@ def run_health_check(photos_dir=None, db_path=None, analysis_cache_file=None,
         items.append(_item("visual_search_index", "语义搜索索引", STATUS_WARN,
                            detail=f"读取失败：{str(e)[:60]}"))
 
+    # ---- 兽装分析环境（Fursee worker 前置：只查路径，不启动进程）----
+    try:
+        from core.identity.fursee_adapter import FurseeAdapterConfig
+        cfg = FurseeAdapterConfig()
+        py_ok = os.path.isfile(cfg.python_exe)
+        wk_ok = os.path.isfile(cfg.worker_path)
+        env_dir = os.path.dirname(cfg.python_exe)
+        detail = (f"worker 解释器 {'就绪' if py_ok else '缺失'} · "
+                  f"worker 脚本 {'就绪' if wk_ok else '缺失'}"
+                  f"（{env_dir}）")
+        ok_env = py_ok and wk_ok
+        items.append(_item(
+            "fursee_env", "兽装分析环境",
+            STATUS_OK if ok_env else STATUS_WARN, 0,
+            detail=detail,
+            fix=("未找到 fursee_test 解释器或 worker 脚本：兽装照片无法完成入库，"
+                 "请确认 conda 环境含 torch(cu128) + ultralytics")
+            if not ok_env else ""))
+    except Exception as e:
+        items.append(_item("fursee_env", "兽装分析环境", STATUS_WARN,
+                           detail=f"检查失败：{str(e)[:60]}"))
+
     # ---- 数据备份新鲜度（库里是人工整理成果，值得提醒）----
     try:
         backup_root = os.path.join(root, "backups")

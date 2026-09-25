@@ -343,6 +343,60 @@ class BackupFreshnessTests(unittest.TestCase):
         self.assertIn("之后库又有改动", item["detail"])
 
 
+class FurseeEnvTests(unittest.TestCase):
+    """兽装分析环境：解释器/脚本任一缺失 → warn（不启动进程，毫秒级）。"""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="fursee_")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    class _Cfg:
+        def __init__(self, py, worker):
+            self.python_exe = py
+            self.worker_path = worker
+
+    def _run(self, cfg):
+        photos = os.path.join(self.tmp, "photos")
+        os.makedirs(photos, exist_ok=True)
+        with mock.patch("core.identity.fursee_adapter.FurseeAdapterConfig",
+                        return_value=cfg):
+            return run_health_check(
+                photos_dir=photos,
+                db_path=os.path.join(self.tmp, "id.sqlite"),
+                analysis_cache_file=os.path.join(self.tmp, "a.json"),
+                visual_index_path=os.path.join(self.tmp, "v.json"),
+                visual_search_cache_dir=os.path.join(self.tmp, "vs"),
+                include_duplicates=False, project_root=self.tmp)
+
+    def test_ok_when_paths_exist(self):
+        py = os.path.join(self.tmp, "python.exe")
+        wk = os.path.join(self.tmp, "worker.py")
+        for p in (py, wk):
+            Path(p).write_bytes(b"x")
+        item = _item(self._run(self._Cfg(py, wk)), "fursee_env")
+        self.assertEqual(item["status"], STATUS_OK, item["detail"])
+        self.assertIn("就绪", item["detail"])
+
+    def test_warns_when_python_missing(self):
+        wk = os.path.join(self.tmp, "worker.py")
+        Path(wk).write_bytes(b"x")
+        item = _item(self._run(self._Cfg(os.path.join(self.tmp, "gone.exe"), wk)),
+                     "fursee_env")
+        self.assertEqual(item["status"], STATUS_WARN)
+        self.assertIn("解释器 缺失", item["detail"])
+        self.assertIn("fursee_test", item["fix"])
+
+    def test_warns_when_worker_script_missing(self):
+        py = os.path.join(self.tmp, "python.exe")
+        Path(py).write_bytes(b"x")
+        item = _item(self._run(self._Cfg(py, os.path.join(self.tmp, "gone.py"))),
+                     "fursee_env")
+        self.assertEqual(item["status"], STATUS_WARN)
+        self.assertIn("脚本 缺失", item["detail"])
+
+
 class StartupHealthCheckTests(unittest.TestCase):
     """启动后台体检：有 warning/error 才在状态栏提示，正常时静默。"""
 
