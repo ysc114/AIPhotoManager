@@ -903,11 +903,17 @@ class _RoleCenterMixinMixin:
             "开启后角色卡片变为静态玻璃卡，滚动/筛选更流畅（可随时关闭恢复）"
         )
         lay.addWidget(perf_btn)
+
+        # 🏷 整理命名：逐个给未命名角色起名（配合稳定序号显示）
+        naming_btn = GlassButton("🏷 整理命名", variant="normal")
+        naming_btn.setToolTip("逐个查看未命名角色并直接命名（回车=保存并下一个）")
+        lay.addWidget(naming_btn)
         lay.addStretch(1)
 
         # state 在页面构建末尾才建立 → 控件暂存 self，加载时挂载到 state
         self._char_toolbar_controls = (
-            edit, type_combo, sort_combo, counter, suspects_btn, perf_btn,
+            edit, type_combo, sort_combo, counter, suspects_btn,
+            perf_btn, naming_btn,
         )
         return bar
 
@@ -1049,7 +1055,8 @@ class _RoleCenterMixinMixin:
             if c:
                 state["filter_edit"], state["filter_type"], \
                     state["filter_sort"], state["filter_counter"], \
-                    state["suspects_btn"], state["perf_btn"] = c
+                    state["suspects_btn"], state["perf_btn"], \
+                    state["naming_btn"] = c
                 state["suspects_btn"].clicked.connect(
                     lambda _, k=page_key: self._open_suspects_view(k)
                 )
@@ -1057,6 +1064,9 @@ class _RoleCenterMixinMixin:
                     lambda _=None: self._toggle_perf_mode()
                 )
                 self._sync_perf_btn(state)
+                state["naming_btn"].clicked.connect(
+                    lambda _, k=page_key: self._open_naming_walkthrough(k)
+                )
         group_type_filter = state["group_type_filter"]
         default_prefix = state["default_prefix"]
 
@@ -1082,6 +1092,9 @@ class _RoleCenterMixinMixin:
             groups = []
 
         state["groups"] = groups
+
+        # 整理命名入口：没有未命名角色时置灰
+        self._sync_naming_btn(state)
 
         if not groups:
             state["stats_label"].setText("暂无数据")
@@ -2112,6 +2125,70 @@ class _RoleCenterMixinMixin:
             "一键关闭极光/折射/阴影等动态渲染\n"
             "开启后角色卡片变为静态玻璃卡，滚动/筛选更流畅（可随时关闭恢复）"
         )
+
+    def _sync_naming_btn(self, state):
+        """整理命名按钮：按未命名数量启用/提示（不改任何数据）。"""
+        btn = state.get("naming_btn")
+        if btn is None:
+            return
+        unnamed = [g for g in (state.get("groups") or [])
+                   if not str(g.get("name") or "").strip()]
+        btn.setEnabled(bool(unnamed))
+        btn.setText(f"🏷 整理命名（{len(unnamed)}）" if unnamed else "🏷 整理命名")
+        btn.setToolTip(
+            f"还有 {len(unnamed)} 个未命名角色：逐个看封面直接命名\n"
+            "回车=保存并下一个；只写名称，不动 detection/聚类"
+            if unnamed else "当前没有未命名角色")
+
+    def _open_naming_walkthrough(self, page_key="character"):
+        """逐个命名未命名角色（人工确认；完成后刷新当前页）。"""
+        state = self._group_pages.get(page_key)
+        if state is None:
+            return
+        unnamed = [g for g in (state.get("groups") or [])
+                   if not str(g.get("name") or "").strip()]
+        if not unnamed:
+            self.statusBar().showMessage("没有未命名角色需要整理", 4000)
+            return
+        from ui.naming_walkthrough import UnnamedRolesDialog
+        dlg = UnnamedRolesDialog(
+            unnamed, self._save_role_name,
+            cover_provider=self._naming_cover_pixmap, parent=self)
+        dlg.exec()
+        if dlg.renamed_count:
+            self.statusBar().showMessage(
+                f"已命名 {dlg.renamed_count} 个角色", 6000)
+            self._load_groups_into_page(page_key)
+        else:
+            self._sync_naming_btn(state)
+
+    def _naming_cover_pixmap(self, group, size=None):
+        """整理命名封面：复用 detection 裁剪（与角色卡片一致）。"""
+        from PySide6.QtGui import QPixmap
+        path = group.get("cover_image") or (group.get("images") or [""])[0]
+        if not path:
+            return QPixmap()
+        dets = [d for d in (group.get("detections") or [])
+                if d and d.get("image_path") == path]
+        det_info = None
+        if dets:
+            best = max(dets, key=lambda d: float(d.get("confidence") or 0.0))
+            det_info = (best.get("bbox"), best.get("embedding_type"))
+        return self._pixmap_for_detection(path, det_info, size)
+
+    def _save_role_name(self, character_id, name):
+        """写路径：新建 IdentityManager（共享只读连接不可写）。"""
+        try:
+            from core.identity import IdentityManager
+            mgr = IdentityManager()
+            try:
+                mgr.update_name(character_id, name)
+            finally:
+                mgr.close()
+            return True
+        except Exception as e:
+            QMessageBox.critical(self, "命名失败", f"写入名称失败：{e}")
+            return False
 
     def _toggle_perf_mode(self):
         """切换渲染性能模式：组件层直接跳过极光/折射/自绘阴影。"""
