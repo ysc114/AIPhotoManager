@@ -89,29 +89,44 @@ MainWindow (PySide6) ────► 总览 / 照片 / 兽装 / 人物 / 角色 
 
 ```
 AIPhotoManager/
-├── main.py                  # 入口（PySide6 MainWindow）
+├── main.py                     # 入口（PySide6 MainWindow）
 ├── core/
-│   ├── storage/             # 存储抽象（local / smb_backend / index）
-│   ├── identity/
-│   │   ├── database.py      # SQLite v2：identity_image / identity_group
-│   │   ├── embedding.py     # L1 分类 + 路由 + CLIP/YOLO 旧链路
-│   │   ├── cluster.py       # DBSCAN + incremental_assign（增量分配）
-│   │   ├── manager.py       # IdentityManager 门面（生产入口）
-│   │   ├── fursee_adapter.py# Fursee worker 子进程适配器（协议/熔断/重试）
-│   │   └── fursee_worker.py # Fursee worker：YOLO 检测 + 512D embedding
-│   ├── ai_classifier.py     # CLIP L1 分类 + 缓存读写
-│   ├── ai_organizer.py      # 「AI智能整理」批量入口
-│   ├── model_hub.py         # 模型单例共享（CLIP/YOLO/insightface）
-│   └── analysis_cache.py    # 分析缓存（JSON）
+│   ├── identity/               # 身份识别与聚类（生产核心）
+│   │   ├── database.py         # SQLite v2：identity_image / identity_group
+│   │   ├── manager.py          # IdentityManager 门面 + get_reader() 共享只读
+│   │   ├── cluster.py          # DBSCAN（仅显式全量）+ incremental_assign
+│   │   ├── naming.py           # 未命名角色稳定序号显示名（只读）
+│   │   ├── suspects.py         # 疑似同一角色候选 + 人工判定 sidecar
+│   │   ├── embedding.py        # L1 分类路由 + CLIP/YOLO 旧链路
+│   │   └── fursee_adapter.py / fursee_worker.py   # GPU worker（conda fursee_test）
+│   ├── visual_search/          # CLIP + FAISS 视觉/语义检索（中文路径安全）
+│   ├── photo_quality/          # 画质评分 / 近似分组 / AI 精选
+│   ├── storage/                # 存储抽象（local / smb_backend / index）
+│   ├── duplicates.py           # MD5 完全重复：大小预筛扫描 + 安全删除
+│   ├── visual_duplicates.py    # 视觉相似指纹 + 人工判定 sidecar
+│   ├── thumbnail_cache.py      # 256/512 磁盘缩略图（2 线程 + 退出兜底）
+│   ├── search_index.py         # 角色/照片关键字索引（筛选语义单一来源）
+│   ├── health_check.py         # 12 项只读数据/环境体检
+│   ├── qt_threads.py           # QThread 回收助手（reap_thread）
+│   ├── analysis_cache.py       # 分析缓存（JSON，可显式指定路径）
+│   ├── ai_classifier.py / ai_organizer.py / model_hub.py
+│   └── labels.py 等
 ├── ui/
-│   └── main_window_v3.py    # 主界面（Phase 2.5：detection 级展示）
-├── tests/                   # 单元/集成测试（temp 库隔离，不碰生产）
-├── config/labels.py         # 分类标签文案
-├── backups/                 # 各阶段生产库备份（git 忽略）
-└── .scratch_5b2/            # 诊断/实验产物（git 忽略）
+│   ├── main_window_v3.py       # 主窗口组装（页面方法拆到 mixin）
+│   ├── overview_mixin.py       # 总览/预览/跳转/相册墙
+│   ├── role_center_mixin.py    # 角色中心（卡片墙/筛选/详情/命名入口）
+│   ├── favorites_mixin.py      # 收藏页
+│   ├── settings_center.py      # 设置中心（含数据体检/一键修复）
+│   ├── duplicates_page.py      # 重复照片页（懒扫描）
+│   ├── naming_walkthrough.py   # 「🏷 整理命名」逐个命名对话框
+│   ├── bottom_nav.py / search_bar.py / aurora_card.py
+│   ├── components/             # Liquid Glass 组件 + Spotlight 搜索面板
+│   └── vendor/pyglass/         # 折射引擎（vendor）
+├── tests/                      # 39 个测试文件 / 338 项（temp 隔离，不碰生产）
+├── config/                     # settings_manager.py / labels.py
+├── backups/                    # 生产库备份（git 忽略）
+└── cache/                      # 缩略图 + 视觉搜索索引（git 忽略）
 ```
-
----
 
 ## 四、环境与运行
 
@@ -268,21 +283,15 @@ cluster.incremental_assign(embedding_type="fursuit_fursee", threshold=0.79, marg
 QT_QPA_PLATFORM=offscreen C:/Program Files/Python310/python.exe -m unittest discover -s tests -p "test_*.py"
 ```
 
-| 测试文件 | 覆盖 |
-|---|---|
-| `test_incremental_cluster.py` | 增量分配 8 项（加入/新建/冲突/同图多det/人工合并保护/visual隔离/幂等/阈值边界）|
-| `test_no_full_recluster.py` | run(None) 抛错 / 定向 run / analyze_folder 不拆组 / 幂等 / face 增量 |
-| `test_detection_aware_identity.py` | merge 保留字段 / schema v2 / Legacy-Fursee 隔离 |
-| `test_detection_aware_ui.py` | 照片墙复合键 / bbox 裁剪渲染（offscreen）|
-| `test_suspect_pairs.py` | 疑似同一角色：候选生成（只读不重聚）/ 不是同一角色持久化 / 合并保真 / 撤销最近合并（temp 库）|
-| `test_suspects_ui.py` | 疑似同一角色 GUI 冒烟（offscreen，只读）|
-| `test_visual_duplicates.py` | 疑似重复照片：dHash/直方图/灰度指纹、分组、MD5 副本隔离、忽略/保留决策持久化、相似搜索（temp）|
-| `test_visual_duplicates_ui.py` | 重复照片页视觉区块 + 相似搜索区块 GUI 冒烟（temp，只标记不删除）|
-| `test_global_search.py` | Spotlight 全局搜索面板：防抖/分区渲染/键盘导航/Esc/最近搜索 + 主窗口快捷键、分发与语义分区冒烟（offscreen）|
-| `test_visual_search.py` | 以图搜图/自然语言搜索：OpenCLIP 加载/设备/维度/归一化/文本 embedding、FAISS 建索/加图/检索排序、增量与 MD5 去重、模型一致性、身份系统零依赖、**中文路径持久化 / 中断续建 / 临时文件清理 / 旧格式升级** |
-| `test_visual_index_ui.py` | 视觉索引维护 UI：入库后自动增量只触发一次、可关闭、失败不弹模态框、索引更新中不并发搜索、设置页状态行与「更新/重建」按钮切换（offscreen，桩 worker）|
-| `test_legacy_visibility.py` | get_groups 过滤（连接生产库，慎跑）|
-| `test_ai_classifier_cache.py` | 缓存命中（None/{}→重分析，有效→命中）|
+| 分组 | 代表文件 | 覆盖 |
+|---|---|---|
+| 身份与聚类 | `test_incremental_cluster.py`、`test_no_full_recluster.py`、`test_detection_aware_identity.py`、`test_suspect_pairs.py`、`test_role_naming.py` | 增量分配 8 项（加入/新建/冲突/同图多 det/人工合并保护/幂等/边界）、禁止全量重聚、detection 复合键与 merge 保真、疑似候选与撤销、稳定显示名与序号 |
+| 重复与相似 | `test_duplicates.py`、`test_visual_duplicates.py`、`test_visual_duplicates_ui.py` | MD5 分组 / 安全删除 / 大小预筛、视觉指纹与决策持久化、页面冒烟（只标记不删除）|
+| 检索与索引 | `test_visual_search.py`、`test_visual_index_ui.py`、`test_global_search.py`、`test_global_search_filters.py`、`test_search_dock.py`、`test_search_filters.py` | CLIP/FAISS（含模型，约 52s：中文路径持久化 / 中断续建 / 临时文件清理 / 旧格式升级）、索引自动增量与重建、Spotlight 与筛选、顶部搜索条与 Dock |
+| 角色与照片 UI | `test_character_page.py`、`test_character_center.py`、`test_detection_aware_ui.py`、`test_photo_wall_dedup.py`、`test_photo_list_restore.py`、`test_naming_walkthrough.py` | 角色页与详情墙（完整原图 + 合照角标 + 跳转）、筛选排序、去重、列表快照与「返回全部」、整理命名 |
+| 界面与视觉 | `test_components.py`、`test_liquid_glass.py`、`test_aurora_config.py`、`test_bottom_nav.py`、`test_phase3_ui.py`、`test_favorites.py` | 组件库、Liquid Glass、极光配置、10 项底部 Dock、收藏与设置页 |
+| 性能与运维 | `test_performance.py`、`test_thumbnail_cache.py`、`test_thumb_primitive.py`、`test_health_check.py`、`test_cache_prune.py`、`test_overview_stats.py`、`test_qt_threads.py`、`test_settings_manager.py` | 6 条性能护栏、缩略图缓存与取图原语、12 项数据体检、失效缓存清理、总览统计口径、QThread 回收、设置持久化 |
+| 其它 | `test_analyze_paths.py`、`test_scan_new_photos.py`、`test_ai_classifier_cache.py`、`test_photo_quality.py`、`test_legacy_visibility.py` | 分析路径与扫描、缓存命中语义、画质评分、旧数据可见性（连生产库，慎跑）|
 
 > ⚠️ `test_legacy_visibility.py` 使用无参 `IdentityManager()`（连生产库），CI/他人环境运行前请确认或跳过。
 
