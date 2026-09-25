@@ -168,6 +168,8 @@ photos/ 新文件
    → ③ _process_single_image()：L1 分类 → route_l1
    → ④ fursuit → _process_fursuit_fursee() → FurseeAdapter.analyze()
    → ⑤ 每个 detection 独立写一行（det_index/bbox/conf/512D，group_id=''）
+     （同一张照片的全部 detection 一次事务提交：中途失败整张回滚，
+      不留「半张照片」记录，下次扫描会重试这张）
    → ⑥ cluster.incremental_assign(threshold=0.79, margin=0.02)
 ```
 
