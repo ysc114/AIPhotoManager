@@ -1325,12 +1325,8 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         self._pending_files = []
         self._pending_list.clear()
         self._pending_worker = None
-        # 自动刷新各分组页 + 总览
-        for key in ("fursuit", "person", "character"):
-            if self._group_page_loaded.get(key):
-                self._load_groups_into_page(key)
-        if self._ui_ready:
-            self._refresh_overview()
+        # 入库完成 → 统一刷新（分组页 + 总览 + 照片页列表 + 待处理统计）
+        self._refresh_after_ingest()
         # 摘要
         self._show_analyze_summary(result)
         # 入库完成 → 后台增量更新视觉/语义搜索索引（设置中心可关）
@@ -1811,6 +1807,29 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
             self._open_group_from_search(payload["group"])
         elif payload.get("path"):
             self._open_photo_by_path(payload["path"])
+
+    def _refresh_after_ingest(self):
+        """入库完成后统一刷新（两个入库入口共用）。
+
+        - 已加载的分组页重新渲染（含新角色）
+        - 照片页列表失效：清掉自动载入标记后重扫 photos/，
+          新照片立刻出现（此前只要浏览过照片页就不再重扫）
+        - 总览统计 + 待处理统计刷新（此前角色页入库这条路径不刷总览）
+        """
+        for key in ("fursuit", "person", "character"):
+            if self._group_page_loaded.get(key):
+                self._load_groups_into_page(key)
+        # 照片页：清空当前列表 + 重置自动载入标记 → 下一步会重扫 photos/
+        self._photos_autoload_done = False
+        if getattr(self, "_ui_ready", False) and not getattr(
+                self, "_photo_list_mode", ""):
+            self.image_list = []
+            self._ensure_photos_loaded()
+        if getattr(self, "_ui_ready", False):
+            self._refresh_overview()
+        refresh_pending = getattr(self, "_refresh_pending_stats", None)
+        if callable(refresh_pending):
+            refresh_pending()
 
     def _ensure_photos_loaded(self):
         """首次进入照片页时自动载入项目 photos/（实测 194 张约 0.11s）。

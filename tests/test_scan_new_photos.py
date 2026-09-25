@@ -265,5 +265,46 @@ class ScanNewPhotosTests(unittest.TestCase):
             "中途失败必须整张回滚，否则整图查重会让它永远缺 detection")
         self.assertTrue(os.path.exists(p), "失败不得删除原照片")
 
+    def test_refresh_after_ingest_invalidates_photo_list(self):
+        """入库后统一刷新：分组页/总览/待处理统计刷新，照片页列表重扫。"""
+        w = MainWindow()
+        try:
+            w._ui_ready = True
+            w._photo_list_mode = ""
+            w.image_list = ["C:/fake/old.jpg"]
+            w._photos_autoload_done = True
+            w._group_page_loaded["fursuit"] = True
+            with mock.patch.object(w, "_load_groups_into_page") as lg, \
+                    mock.patch.object(w, "_refresh_overview") as ov, \
+                    mock.patch.object(w, "_refresh_pending_stats") as ps, \
+                    mock.patch.object(w, "_ensure_photos_loaded") as ensure:
+                w._refresh_after_ingest()
+            lg.assert_called_once_with("fursuit")
+            self.assertTrue(ov.called, "总览应刷新")
+            self.assertTrue(ps.called, "待处理统计应刷新")
+            self.assertFalse(w._photos_autoload_done, "自动载入标记应复位")
+            self.assertEqual(w.image_list, [], "旧列表应清空以便重扫 photos/")
+            self.assertTrue(ensure.called, "应触发重扫")
+        finally:
+            w.close()
+
+    def test_scan_done_uses_unified_refresh(self):
+        """角色页入库完成 → 走统一刷新（此前只刷本页，总览/照片页不更新）。"""
+        w = MainWindow()
+        try:
+            w._ui_ready = True
+            w._scan_worker_page = "fursuit"
+            w._group_pages["fursuit"]["refresh_btn"].setEnabled(False)
+            with mock.patch.object(w, "_refresh_after_ingest") as refresh, \
+                    mock.patch.object(w, "_update_visual_index_async"), \
+                    mock.patch("ui.role_center_mixin.QMessageBox"):
+                w._on_scan_done({"scanned": 3, "new": 2, "skipped": 1, "failed": 0})
+            self.assertTrue(refresh.called, "应走统一刷新")
+            self.assertTrue(w._group_pages["fursuit"]["refresh_btn"].isEnabled(),
+                            "刷新按钮应恢复可用")
+            self.assertIsNone(w._scan_worker, "worker 引用应清空")
+        finally:
+            w.close()
+
 if __name__ == "__main__":
     unittest.main()

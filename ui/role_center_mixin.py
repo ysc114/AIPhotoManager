@@ -845,7 +845,8 @@ class _RoleCenterMixinMixin:
         state = self._group_pages.get(self._scan_worker_page)
         if state is not None:
             state["refresh_btn"].setEnabled(True)
-        self._load_groups_into_page(self._scan_worker_page)
+        # 统一刷新：分组页（含本页）+ 总览 + 照片页列表 + 待处理统计
+        self._refresh_after_ingest()
         self.statusBar().showMessage("分析完成，列表已刷新", 8000)
         QMessageBox.information(
             self,
