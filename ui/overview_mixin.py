@@ -271,9 +271,9 @@ class _OverviewMixinMixin:
         # 在已迁移的 v2 库上不产生任何写入。
         # 独立 try/except：即便身份库读取失败，上方 cache 统计仍保留。
         try:
-            from core.identity import IdentityManager
+            from core.identity import get_reader
 
-            mgr = IdentityManager()
+            mgr = get_reader()   # 共享只读连接（总览统计高频路径）
             try:
                 groups = mgr.get_groups() or []
                 stats["group_count"] = len(groups)

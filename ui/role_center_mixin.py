@@ -470,8 +470,8 @@ class _RoleCenterMixinMixin:
             if det_map:
                 return det_map
         try:
-            from core.identity import IdentityManager
-            mgr = IdentityManager()
+            from core.identity import get_reader
+            mgr = get_reader()   # 共享只读连接（detection 查询，close 为 no-op）
             try:
                 rows = mgr.db.get_images_by_group(cid) or []
             finally:
@@ -1715,8 +1715,8 @@ class _RoleCenterMixinMixin:
         candidates = []
         can_undo = False
         try:
-            from core.identity import IdentityManager
-            mgr = IdentityManager()
+            from core.identity import get_reader
+            mgr = get_reader()   # 共享只读连接（疑似候选/撤销状态，close 为 no-op）
             try:
                 candidates = mgr.get_suspect_candidates() or []
                 can_undo = bool(mgr.can_undo_last_merge())
