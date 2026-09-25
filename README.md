@@ -34,10 +34,11 @@ AI 照片管理系统：本地 + NAS 照片管理，AI 自动分类、兽装/人
 - **疑似同一角色**（角色中心 2.0 · 第二阶段）：跨 Fursee 组相似候选（只读比较，不改 0.79/eps）→ 人工确认才合并；"不是同一角色"判定与最近合并快照存 JSON sidecar（不改 schema），支持撤销最近一次合并
 - **疑似重复照片**（路线图 ②）：视觉相似检测（dHash + 直方图 + 灰度相关性，区别于 MD5 的"内容完全一致"）——连拍/构图相似/轻微糊/曝光不同；AI 只推荐，人工「保留此张/忽略该组」，绝不自动删除（待清理仅标记，落盘 JSON 缓存复用）
 - **相似照片搜索**（路线图 ③）：选一张照片 → 复用视觉指纹返回库内最相似的 N 张（同场景/同角色/连拍），纯只读
+- **收藏**：照片页「⭐ 收藏当前」按**当前预览照片**收藏/取消（普通浏览与角色墙/收藏跳转都可用），按钮文案跟随状态（已收藏 → 「★ 已收藏（点击取消）」）；收藏页网格支持点击预览完整原图与右键取消；只写 `favorite_image` 表，不触碰角色/detection/embedding
 - **全局搜索面板**（路线图 ④ 第一阶段）：Spotlight 风格悬浮搜索（Ctrl+K / Ctrl+Shift+F），分区结果（最近搜索/角色/照片/收藏，标签/文件预留）；**筛选与顶部搜索条统一**：类型（全部/兽装/人物，作用于角色）与「⭐ 只看收藏」（作用于照片/语义，开启时照片并入收藏分区避免重复展示）；组件化 `ui/components/global_search.py`，只发信号，数据与跳转由 MainWindow 决定
 - **以图搜图**（智能搜索第 2 层 · 第一阶段）：独立 OpenCLIP 视觉 Embedding + FAISS 索引（`core/visual_search/`，`cache/visual_search/`）；GPU/CPU 自适应、L2 归一化、增量建索引（已索引复用 / MD5 去重）、模型版本校验（换模型不混用）；索引读写走内存序列化（**中文路径安全**：faiss 自带路径式 I/O 在含中文目录下会失败）、**分批落盘（中断可续建）**；照片页「🔎 查找相似照片」
 - **自然语言搜索**（第 2 层 · 第二阶段）：同一 CLIP 空间文本 embedding（`encode_text`）→ `search_by_text`；Spotlight 全局搜索面板新增 **🧠 语义（CLIP）** 分区（索引为空时后台自动构建并在完成后自动刷新结果）；**首次加载模型后台预热**（不阻塞界面，完成后自动刷新结果），权重**离线优先**（`HF_HUB_OFFLINE`，避免网络受限时重试 15s+；需要联网下载新模型设 `VISUAL_SEARCH_ALLOW_DOWNLOAD=1`）
-- **数据体检（只读）**：设置中心「🩺 运行体检」一屏检查 12 项——数据库完整性 / 库内照片文件 / 未分配 detection / 角色组照片可用性 / photos 待入库 / 分析缓存 / 视觉指纹缓存 / 语义搜索索引 / 完全重复照片 / 云同步残留（百度网盘 .cfg 占位文件，含 .git 内计数）/ 数据备份新鲜度（最近备份超过 14 天、或备份之后库又有改动 → 提示一键备份）/ 兽装分析环境（fursee_test 解释器与 worker 脚本是否就绪，只查路径不启进程）；只 stat+查库+读 JSON，不加载 AI 模型（实测全库 0.3s），每项给出结论与建议动作（`core/health_check.py`）；能自动修的项目配一键入口（清理失效缓存 / 去待处理页入库 / 更新视觉索引 / 去重复照片页 / 立即备份），无问题时自动置灰；**启动后 2.5s 后台自动体检一次**（约 0.2s，只读），有 warning/error 时在状态栏提示，正常则完全静默
+- **数据体检（只读）**：设置中心「🩺 运行体检」一屏检查 12 项——数据库完整性 / 库内照片文件 / 未分配 detection / 角色组照片可用性 / photos 待入库 / 分析缓存 / 视觉指纹缓存 / 语义搜索索引 / 完全重复照片 / 云同步残留（百度网盘 .cfg 占位文件，含 .git 内计数）/ 数据备份新鲜度（最近备份超过 14 天、或备份之后库又有改动 → 提示一键备份）/ 兽装分析环境（fursee_test 解释器与 worker 脚本是否就绪，只查路径不启进程）；只 stat+查库+读 JSON，不加载 AI 模型（实测全库 0.3s），每项给出结论与建议动作（`core/health_check.py`）；能自动修的项目配一键入口（清理失效缓存 / 去待处理页入库 / 更新视觉索引 / 去重复照片页 / 立即备份），无问题时自动置灰；**启动后 2.5s 后台自动体检一次**（约 0.2s，只读），有 warning/error 时在状态栏提示，正常则完全静默；**关窗时统一回收后台线程**（体检/索引/相似搜索等），避免退出期原生崩溃
 - **失效缓存清理**：设置中心「🧹 清理失效缓存」——删除分析缓存与视觉指纹中指向**已删除照片**的条目（只清缓存键，绝不删照片文件；人工分类与「不是同一角色/保留」判定保持不变），AI 数据统计行会显示当前失效条数
 - **索引自动维护**：分析/扫描新照片入库完成后，后台增量补齐视觉搜索索引（设置中心可关：`data.auto_update_visual_index`，失败只提示不弹窗）；设置中心「AI 数据」显示索引状态（已索引/总数/模型/更新时间）并提供「更新/重建视觉索引」入口（重建需二次确认，仅删搜索缓存）
 - **整理命名（逐个命名未命名角色）**：角色中心工具栏「🏷 整理命名（N）」→ 逐个显示未命名角色的 detection 裁剪封面 + 稳定序号 + 照片数，回车=保存并下一个、可跳过、随时结束；只调用既有 `update_name`，不合并、不动 detection/聚类（`ui/naming_walkthrough.py`）
@@ -291,14 +292,14 @@ QT_QPA_PLATFORM=offscreen C:/Program Files/Python310/python.exe -m unittest disc
 | 检索与索引 | `test_visual_search.py`、`test_visual_index_ui.py`、`test_global_search.py`、`test_global_search_filters.py`、`test_search_dock.py`、`test_search_filters.py` | CLIP/FAISS（含模型，约 52s：中文路径持久化 / 中断续建 / 临时文件清理 / 旧格式升级）、索引自动增量与重建、Spotlight 与筛选、顶部搜索条与 Dock |
 | 角色与照片 UI | `test_character_page.py`、`test_character_center.py`、`test_detection_aware_ui.py`、`test_photo_wall_dedup.py`、`test_photo_list_restore.py`、`test_naming_walkthrough.py` | 角色页与详情墙（完整原图 + 合照角标 + 跳转）、筛选排序、去重、列表快照与「返回全部」、整理命名 |
 | 界面与视觉 | `test_components.py`、`test_liquid_glass.py`、`test_aurora_config.py`、`test_bottom_nav.py`、`test_phase3_ui.py`、`test_favorites.py` | 组件库、Liquid Glass、极光配置、10 项底部 Dock、收藏与设置页 |
-| 性能与运维 | `test_performance.py`、`test_thumbnail_cache.py`、`test_thumb_primitive.py`、`test_health_check.py`、`test_cache_prune.py`、`test_overview_stats.py`、`test_qt_threads.py`、`test_settings_manager.py` | 6 条性能护栏、缩略图缓存与取图原语、12 项数据体检、失效缓存清理、总览统计口径、QThread 回收、设置持久化 |
+| 性能与运维 | `test_performance.py`、`test_thumbnail_cache.py`、`test_thumb_primitive.py`、`test_health_check.py`、`test_cache_prune.py`、`test_overview_stats.py`、`test_qt_threads.py`、`test_settings_manager.py` | 6 条性能护栏、缩略图缓存与取图原语、12 项数据体检、失效缓存清理、总览统计口径、QThread 回收（含关窗等待后台线程）、设置持久化 |
 | 其它 | `test_analyze_paths.py`、`test_scan_new_photos.py`、`test_ai_classifier_cache.py`、`test_photo_quality.py`、`test_legacy_visibility.py` | 分析路径与扫描、缓存命中语义、画质评分、旧数据可见性（连生产库，慎跑）|
 
 > ⚠️ `test_legacy_visibility.py` 使用无参 `IdentityManager()`（连生产库），CI/他人环境运行前请确认或跳过。
 
 ### 测试规模（2026-09-25）
 
-`tests/` 共 **39 个测试文件 / 338 项**，全绿；其中 2 个文件需要加载模型
+`tests/` 共 **39 个测试文件 / 358 项**，全绿（运行结束进程退出码 0）；其中 2 个文件需要加载模型
 （`test_visual_search` 约 52s、`test_character_center` 约 48s），其余文件合计约 2 分钟。
 
 ### 性能基线（2026-09-25 实测，offscreen，194 张照片）
