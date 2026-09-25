@@ -1498,6 +1498,15 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
             return
         sections = []
 
+        # 筛选（与顶部搜索条同一语义）：类型作用于角色，收藏作用于照片/语义
+        try:
+            flt = (self._global_search.filters()
+                   if hasattr(self._global_search, "filters") else {})
+        except Exception:
+            flt = {}
+        type_filter = str(flt.get("type_filter") or "all")
+        favorite_only = bool(flt.get("favorite_only", False))
+
         # 🐺/👤 角色（get_groups 只读，名称或 id 子串匹配）
         char_items = []
         try:
@@ -1510,6 +1519,8 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         except Exception:
             groups = []
         for g in groups:
+            if type_filter != "all" and str(g.get("type") or "") != type_filter:
+                continue
             name = (g.get("name") or "").lower()
             cid = str(g.get("character_id") or "").lower()
             cat = (self._format_group_category(g) or "").lower()
@@ -1533,11 +1544,25 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         if char_items:
             sections.append({"title": "🐺 角色", "items": char_items})
 
-        # 📷 照片（photos/ 文件名子串匹配；预留标签/文件分区）
+        # ⭐ 收藏集合先取（照片/语义筛选与收藏分区共用，只读）
+        fav_items = []
+        try:
+            from core.identity import get_reader
+            mgr = get_reader()
+            try:
+                favs = mgr.db.list_favorites()
+            finally:
+                mgr.close()
+        except Exception:
+            favs = []
+        fav_set = {str(p).replace("\\", "/") for p in (favs or [])}
+
+        # 📷 照片（photos/ 文件名子串匹配；favorite_only 时仅收藏）
         photos_dir = os.path.normpath(os.path.join(
             os.path.dirname(os.path.abspath(__file__)), "..", "photos"))
         photo_items = []
-        if os.path.isdir(photos_dir):
+        if os.path.isdir(photos_dir) and not favorite_only:
+            # 只看收藏时统一由 ⭐ 收藏 分区承载，避免同一张照片出现两次
             for n in sorted(os.listdir(photos_dir)):
                 if q in n.lower():
                     p = os.path.join(photos_dir, n).replace("\\", "/")
@@ -1550,18 +1575,7 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
                         break
         if photo_items:
             sections.append({"title": "📷 照片", "items": photo_items})
-
-        # ⭐ 收藏（favorite_image 只读，文件名匹配）
-        fav_items = []
-        try:
-            from core.identity import get_reader
-            mgr = get_reader()
-            try:
-                favs = mgr.db.list_favorites()
-            finally:
-                mgr.close()
-        except Exception:
-            favs = []
+        fav_limit = 6 if favorite_only else 4
         for p in favs:
             if q in os.path.basename(p).lower():
                 fav_items.append({
@@ -1569,7 +1583,7 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
                     "subtitle": "收藏", "badge": "收藏",
                     "payload": {"kind": "photo", "path": p},
                 })
-                if len(fav_items) >= 4:
+                if len(fav_items) >= fav_limit:
                     break
         if fav_items:
             sections.append({"title": "⭐ 收藏", "items": fav_items})
@@ -1594,6 +1608,8 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
                     })
                 else:
                     for r in s_idx.search_by_text(q, enc, top_k=4):
+                        if favorite_only and r["path"] not in fav_set:
+                            continue
                         semantic_items.append({
                             "icon": "🧠",
                             "title": os.path.basename(r["path"]),

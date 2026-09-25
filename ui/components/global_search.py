@@ -20,13 +20,13 @@ from PySide6.QtCore import Qt, QTimer, Signal, QVariantAnimation, QEasingCurve, 
 from PySide6.QtGui import QPainter, QColor, QLinearGradient, QRadialGradient, QPen
 from PySide6.QtWidgets import (
     QWidget, QLineEdit, QLabel, QHBoxLayout, QVBoxLayout, QScrollArea, QFrame,
-    QGraphicsDropShadowEffect,
+    QGraphicsDropShadowEffect, QComboBox, QPushButton,
 )
 
 from config.settings_manager import settings as S
 
 PANEL_W = 640
-PANEL_H = 540
+PANEL_H = 576
 PANEL_RADIUS = 24
 
 
@@ -182,6 +182,39 @@ class GlobalSearchPanel(QWidget):
         input_row.addWidget(esc_hint)
         outer.addLayout(input_row)
 
+        # 筛选行（与顶部搜索条同一语义：类型作用于角色，收藏作用于照片/语义）
+        filter_row = QHBoxLayout()
+        filter_row.setSpacing(8)
+        self._filter_type = QComboBox()
+        for label, data in (("全部", "all"), ("兽装角色", "fursuit_character"),
+                            ("人物角色", "real_person")):
+            self._filter_type.addItem(label, data)
+        self._filter_type.setStyleSheet(
+            "QComboBox{background:rgba(255,255,255,0.72);border:1px solid "
+            "rgba(255,255,255,0.9);border-radius:12px;padding:4px 10px;"
+            "font-size:11.5px;color:#3a5a7a;}"
+            "QComboBox::drop-down{border:none;width:16px;}"
+            "QComboBox QAbstractItemView{background:#f8faff;border-radius:8px;"
+            "selection-background-color:rgba(120,160,255,0.25);color:#2a3a4e;}")
+        self._filter_type.setToolTip("类型筛选作用于「角色」分区")
+        self._filter_type.currentIndexChanged.connect(self._on_filters_changed)
+        filter_row.addWidget(self._filter_type)
+
+        self._filter_fav = QPushButton("⭐ 收藏")
+        self._filter_fav.setCheckable(True)
+        self._filter_fav.setCursor(Qt.PointingHandCursor)
+        self._filter_fav.setStyleSheet(
+            "QPushButton{background:rgba(255,255,255,0.72);border:1px solid "
+            "rgba(255,255,255,0.9);border-radius:12px;padding:4px 12px;"
+            "font-size:11.5px;color:#3a5a7a;}"
+            "QPushButton:checked{background:rgba(255,214,102,0.85);"
+            "border:1px solid rgba(240,190,60,0.9);color:#5a4200;font-weight:700;}")
+        self._filter_fav.setToolTip("只看收藏照片（作用于照片与语义分区）")
+        self._filter_fav.toggled.connect(self._on_filters_changed)
+        filter_row.addWidget(self._filter_fav)
+        filter_row.addStretch(1)
+        outer.addLayout(filter_row)
+
         # 最近搜索行（横向胶囊）
         self._recent_host = QWidget()
         self._recent_layout = QHBoxLayout(self._recent_host)
@@ -271,6 +304,17 @@ class GlobalSearchPanel(QWidget):
     # --------------------------------------------------------
     # 数据接口（只渲染，不查询）
     # --------------------------------------------------------
+    def filters(self):
+        """当前筛选（与顶部搜索条同一语义）：类型作用于角色，收藏作用于照片/语义。"""
+        return {
+            "type_filter": (self._filter_type.currentData() or "all"),
+            "favorite_only": bool(self._filter_fav.isChecked()),
+        }
+
+    def _on_filters_changed(self, *args):
+        """筛选变化 → 用当前输入立即重跑（不等 120ms 防抖）。"""
+        self._emit_request()
+
     def set_query(self, text):
         self.input.blockSignals(True)
         self.input.setText(text)
