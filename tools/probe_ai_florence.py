@@ -1,3 +1,9 @@
+import os
+import sys
+_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+if _ROOT not in sys.path:
+    sys.path.insert(0, _ROOT)
+
 # -*- coding: utf-8 -*-
 """
 test_ai.py - AI 模型测试脚本
@@ -8,7 +14,6 @@ test_ai.py - AI 模型测试脚本
 import os
 os.environ['HF_ENDPOINT'] = 'https://hf-mirror.com'
 import sys
-from pathlib import Path
 
 # 确保 Python 3.10+
 if sys.version_info < (3, 10):

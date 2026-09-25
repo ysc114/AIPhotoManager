@@ -123,6 +123,7 @@ AIPhotoManager/
 │   ├── components/             # Liquid Glass 组件 + Spotlight 搜索面板
 │   └── vendor/pyglass/         # 折射引擎（vendor）
 ├── tests/                      # 39 个测试文件 / 338 项（temp 隔离，不碰生产）
+├── tools/                      # 手工探针（probe_clip / probe_ai_florence，非测试）
 ├── config/                     # settings_manager.py / labels.py
 ├── backups/                    # 生产库备份（git 忽略）
 └── cache/                      # 缩略图 + 视觉搜索索引（git 忽略）
