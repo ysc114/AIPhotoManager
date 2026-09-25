@@ -299,7 +299,7 @@ QT_QPA_PLATFORM=offscreen C:/Program Files/Python310/python.exe -m unittest disc
 
 ### 测试规模（2026-09-25）
 
-`tests/` 共 **39 个测试文件 / 365 项**，全绿（运行结束进程退出码 0）；其中 2 个文件需要加载模型
+`tests/` 共 **39 个测试文件 / 367 项**，全绿（运行结束进程退出码 0）；其中 2 个文件需要加载模型
 （`test_visual_search` 约 52s、`test_character_center` 约 48s），其余文件合计约 2 分钟。
 
 ### 性能基线（2026-09-25 实测，offscreen，194 张照片）
