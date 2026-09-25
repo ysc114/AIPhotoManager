@@ -271,7 +271,7 @@ class DetectionAwareUiTests(unittest.TestCase):
         """照片页「同框角色」：列出该照片的角色并跳转。"""
         window = MainWindow()
         try:
-            window.current_image_path = "C:/fake/photo.jpg"
+            window._preview_path = "C:/fake/photo.jpg"
             refs = [{"character_id": "cid-a", "name": "", "type": "fursuit_character",
                      "photos": 3, "detection_index": 0},
                     {"character_id": "cid-b", "name": "", "type": "fursuit_character",
@@ -311,7 +311,7 @@ class DetectionAwareUiTests(unittest.TestCase):
                 QTest.mouseClick(window.btn_roles, Qt.LeftButton)
             self.assertTrue(handler.called, "按钮应触发 _show_photo_roles")
 
-            window.current_image_path = "C:/fake/none.jpg"
+            window._preview_path = "C:/fake/none.jpg"
             with mock.patch.object(window, "_photo_roles_refs", return_value=[]), \
                     mock.patch.object(window, "_build_multi_role_menu") as build:
                 window._show_photo_roles()
