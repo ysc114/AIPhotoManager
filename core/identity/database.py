@@ -417,27 +417,38 @@ class IdentityDatabase:
     def get_groups_by_image(self, image_path):
         """只读：该照片（任一 detection）所属的全部角色组。
 
-        返回 [{character_id, name, type, detection_index, bbox, confidence}]，
-        按 detection_index 排序；用于「这张合照属于哪些角色」跳转菜单。
+        按角色去重（同一角色在同一张照片上有多个 detection 时取 confidence
+        最高者），返回 [{character_id, name, type, detection_index, bbox,
+        confidence, embedding_type, photos, serial}]；用于「这张合照属于哪些
+        角色」跳转菜单。
         """
         if not image_path:
             return []
         rows = self.conn.execute(
-            """SELECT i.group_id, g.name, g.type,
-                      i.detection_index, i.bbox, i.confidence, i.embedding_type,
-                      (SELECT COUNT(DISTINCT i2.image_path)
-                         FROM identity_image AS i2
-                        WHERE i2.group_id = i.group_id) AS photos,
-                      (SELECT s.serial FROM (
-                           SELECT id, ROW_NUMBER() OVER (
-                               PARTITION BY type
-                               ORDER BY created_at DESC, id DESC) AS serial
-                           FROM identity_group) AS s
-                       WHERE s.id = i.group_id) AS serial
-               FROM identity_image AS i
-               LEFT JOIN identity_group AS g ON g.id = i.group_id
-               WHERE i.image_path = ? AND i.group_id <> ''
-               ORDER BY i.detection_index""",
+            """SELECT group_id, name, type, detection_index, bbox, confidence,
+                      embedding_type, photos, serial
+               FROM (
+                   SELECT i.group_id, g.name, g.type,
+                          i.detection_index, i.bbox, i.confidence,
+                          i.embedding_type,
+                          (SELECT COUNT(DISTINCT i2.image_path)
+                             FROM identity_image AS i2
+                            WHERE i2.group_id = i.group_id) AS photos,
+                          (SELECT s.serial FROM (
+                               SELECT id, ROW_NUMBER() OVER (
+                                   PARTITION BY type
+                                   ORDER BY created_at DESC, id DESC) AS serial
+                               FROM identity_group) AS s
+                           WHERE s.id = i.group_id) AS serial,
+                          ROW_NUMBER() OVER (
+                              PARTITION BY i.group_id
+                              ORDER BY i.confidence DESC, i.detection_index
+                          ) AS rn
+                   FROM identity_image AS i
+                   LEFT JOIN identity_group AS g ON g.id = i.group_id
+                   WHERE i.image_path = ? AND i.group_id <> ''
+               ) WHERE rn = 1
+               ORDER BY detection_index""",
             (str(image_path),),
         ).fetchall()
         return [

@@ -83,3 +83,48 @@ class GroupSerialTests(unittest.TestCase):
             self.assertEqual(groups["g_new"]["serial"], 1)
         finally:
             mgr.close()
+
+
+class GroupRefDedupeTests(unittest.TestCase):
+    """get_groups_by_image：同一角色多个 detection 只返回一行（最高 confidence）。
+
+    生产库实测有 4 张照片在同一角色下有 2 个 detection，会让合照跳转菜单
+    把同一角色列两次。
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="refs_")
+        self.db_path = os.path.join(self.tmp, "id.sqlite")
+        self.db = IdentityDatabase(self.db_path)
+        self.path = "C:/fake/same.jpg"
+        con = sqlite3.connect(self.db_path)
+        for gid, created in (("gA", "2026-01-01 00:00:00"),
+                             ("gB", "2026-02-01 00:00:00")):
+            con.execute(
+                "INSERT INTO identity_group (id, name, type, created_at)"
+                " VALUES (?,?,?,?)", (gid, "", "fursuit_character", created))
+        # 注意：schema 的 UNIQUE(image_path, detection_index) 是全局的，
+        # 同一张照片的不同角色必须占用不同的 detection_index
+        for gid, det, conf in (("gA", 0, 0.70), ("gA", 1, 0.95),
+                               ("gB", 2, 0.80)):
+            con.execute(
+                "INSERT INTO identity_image (group_id, image_path,"
+                " detection_index, embedding_type, confidence)"
+                " VALUES (?,?,?,?,?)", (gid, self.path, det,
+                                        "fursuit_fursee", conf))
+        con.commit()
+        con.close()
+
+    def tearDown(self):
+        self.db.close()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_same_group_detections_deduped(self):
+        refs = self.db.get_groups_by_image(self.path)
+        cids = [r["character_id"] for r in refs]
+        self.assertEqual(sorted(cids), ["gA", "gB"], "每个角色只出现一次")
+        self.assertEqual(len(cids), len(set(cids)))
+        ga = [r for r in refs if r["character_id"] == "gA"][0]
+        self.assertAlmostEqual(ga["confidence"], 0.95, places=3,
+                               msg="同角色多 detection 取 confidence 最高者")
+        self.assertEqual(ga["detection_index"], 1)
