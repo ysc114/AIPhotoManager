@@ -15,7 +15,7 @@ MD5 删除仍走 core.duplicates.DuplicateCleaner（只清理该文件自身记�
 import os
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QThread
+from PySide6.QtCore import Qt, Signal, QThread, QTimer
 from PySide6.QtWidgets import (
     QWidget, QLabel, QVBoxLayout, QHBoxLayout, QScrollArea, QGridLayout,
     QCheckBox, QFrame, QPushButton, QMessageBox, QFileDialog,
@@ -75,23 +75,40 @@ def _load_thumb(label, path, w, h):
         pass
 
 
+class _VisualScanCancelled(Exception):
+    """Stop only at an existing fingerprint progress boundary."""
+
+
 class _VisualScanWorker(QThread):
     """后台计算视觉指纹（首次/有新照片时），完成后返回候选组。"""
 
     progress = Signal(int, int)         # (done, total)
     done = Signal(object)               # groups list
     failed = Signal(str)
+    cancelled = Signal()
 
     def __init__(self, index, parent=None):
         super().__init__(parent)
         self._index = index
 
     def run(self):
+        def report_progress(done, total):
+            if self.isInterruptionRequested():
+                raise _VisualScanCancelled()
+            self.progress.emit(done, total)
+
         try:
-            self._index.compute_all(
-                progress_cb=lambda d, t: self.progress.emit(d, t))
+            if self.isInterruptionRequested():
+                raise _VisualScanCancelled()
+            self._index.compute_all(progress_cb=report_progress)
+            if self.isInterruptionRequested():
+                raise _VisualScanCancelled()
             groups = self._index.groups()
+            if self.isInterruptionRequested():
+                raise _VisualScanCancelled()
             self.done.emit(groups)
+        except _VisualScanCancelled:
+            self.cancelled.emit()
         except Exception as e:
             self.failed.emit(str(e))
 
@@ -252,6 +269,7 @@ class DuplicatesPage(QWidget):
         worker.progress.connect(self._on_visual_progress)
         worker.done.connect(self._on_visual_done)
         worker.failed.connect(self._on_visual_failed)
+        worker.cancelled.connect(self._on_visual_cancelled)
         self._visual_worker = worker
         worker.start()
 
@@ -259,27 +277,43 @@ class DuplicatesPage(QWidget):
         self._visual_stats.setText(f"检测中… {done}/{total}")
 
     def _on_visual_done(self, groups):
-        reap_thread(self._visual_worker)
+        if not reap_thread(self._visual_worker):
+            QTimer.singleShot(100, lambda: self._on_visual_done(groups))
+            return
         self._visual_worker = None
         self._visual_btn.setEnabled(True)
         self._visual_groups = groups or []
         self._rebuild()
 
     def shutdown_workers(self, timeout_ms=3000):
-        """关窗前停止后台视觉扫描（QThread 未结束就退出会崩）。"""
+        """Return False and retain ownership if the worker has not exited."""
         worker = getattr(self, "_visual_worker", None)
         if worker is None:
-            return
+            return True
         try:
             if worker.isRunning():
                 worker.requestInterruption()
-                worker.wait(int(timeout_ms))
+                if not worker.wait(int(timeout_ms)):
+                    return False
+            if worker.isRunning():
+                return False
         except Exception:
-            pass
+            return False
         self._visual_worker = None
+        return True
+
+    def _on_visual_cancelled(self):
+        if not reap_thread(self._visual_worker):
+            QTimer.singleShot(100, self._on_visual_cancelled)
+            return
+        self._visual_worker = None
+        self._visual_btn.setEnabled(True)
+        self._visual_stats.setText("检测已取消")
 
     def _on_visual_failed(self, err):
-        reap_thread(self._visual_worker)
+        if not reap_thread(self._visual_worker):
+            QTimer.singleShot(100, lambda: self._on_visual_failed(err))
+            return
         self._visual_worker = None
         self._visual_btn.setEnabled(True)
         self._visual_stats.setText("检测失败")

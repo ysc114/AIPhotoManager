@@ -376,6 +376,18 @@ class VisualIndexPersistenceTests(unittest.TestCase):
         self.assertEqual(
             read_index_status(cache_dir=str(cache))["state"], "ready")
 
+    def test_corrupt_faiss_file_reports_load_error(self):
+        """metadata 可读但 FAISS 损坏时，后台可识别并触发重建。"""
+        cache = self.dir / "corrupt_cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        (cache / "index.faiss").write_bytes(b"not-a-faiss-index")
+        with open(cache / "metadata.json", "w", encoding="utf-8") as fh:
+            json.dump({"version": 1, "model": self.encoder.model_info(),
+                       "entries": []}, fh)
+        idx = VisualSearchIndex(cache_dir=str(cache))
+        self.assertTrue(idx.load_error)
+        self.assertEqual(idx.count(), 0)
+
     def test_legacy_index_upgraded(self):
         """旧格式（faiss.write_index）索引可读，并自动改写为新格式。"""
         import faiss

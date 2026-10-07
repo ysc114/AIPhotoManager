@@ -9,6 +9,10 @@ from config.labels import LABEL_MAP
 from core.analysis_cache import get_cache
 
 
+class _OrganizeCancelled(Exception):
+    pass
+
+
 class AIOrganizer:
 
     def __init__(self):
@@ -16,12 +20,17 @@ class AIOrganizer:
         self._classifier = None
         self._identity_manager = None
         self.cache = get_cache()
+        self._cancelled = None
 
     def stop(self):
         self._stop_flag = True
 
-    def organize_folder(self, image_paths, progress_callback=None):
+    def _should_stop(self):
+        return self._stop_flag or bool(self._cancelled and self._cancelled())
+
+    def organize_folder(self, image_paths, progress_callback=None, cancelled=None):
         self._stop_flag = False
+        self._cancelled = cancelled
         start_time = time.time()
         total = len(image_paths)
 
@@ -35,6 +44,7 @@ class AIOrganizer:
             "images": [],
             "characters": [],
             "wallpapers": [],
+            "errors": [],
         }
 
         cat_result = self._step_classify(image_paths, progress_callback)
@@ -55,6 +65,7 @@ class AIOrganizer:
             return result
 
         result["characters"] = char_result.get("characters", [])
+        result["errors"] = cat_result.get("errors", []) + char_result.get("errors", [])
         result["wallpapers"] = self._step_wallpapers(result["images"])
         result["time_cost"] = round(time.time() - start_time, 1)
 
@@ -64,6 +75,8 @@ class AIOrganizer:
         return result
 
     def _step_classify(self, image_paths, progress_callback):
+        if self._should_stop():
+            return {"cancelled": True}
         if progress_callback:
             progress_callback("classify", "正在AI分类...", 0)
 
@@ -72,10 +85,11 @@ class AIOrganizer:
         images = []
         success = 0
         failed = 0
+        errors = []
         total = len(image_paths)
 
         for idx, path in enumerate(image_paths):
-            if self._stop_flag:
+            if self._should_stop():
                 return {"cancelled": True}
             try:
                 cached = self.cache.get(path)
@@ -95,19 +109,20 @@ class AIOrganizer:
                 categories[cat_name] = categories.get(cat_name, 0) + 1
                 images.append({"path": path, "category": cat_name, "quality": quality, "character_id": None, "feedback": has_feedback})
                 success += 1
-            except Exception:
+            except Exception as exc:
                 categories["分析失败"] = categories.get("分析失败", 0) + 1
                 images.append({"path": path, "category": "分析失败", "quality": 0, "character_id": None, "feedback": False})
                 failed += 1
+                errors.append(f"{path}: {exc}")
             if progress_callback and idx % 5 == 0:
                 progress_callback("classify", f"AI分类 {idx+1}/{total}", int((idx+1)/total*60))
 
-        return {"categories": dict(sorted(categories.items(), key=lambda x: x[1], reverse=True)), "images": images, "success": success, "failed": failed}
+        return {"categories": dict(sorted(categories.items(), key=lambda x: x[1], reverse=True)), "images": images, "success": success, "failed": failed, "errors": errors}
 
     def _step_characters(self, images, progress_callback):
         if progress_callback:
             progress_callback("characters", "正在识别角色...", 65)
-        if self._stop_flag:
+        if self._should_stop():
             return {"cancelled": True}
 
         person_paths = [img.get("path") for img in images if img.get("category") and ("兽装" in str(img.get("category")) or "人物" in str(img.get("category")))]
@@ -116,14 +131,25 @@ class AIOrganizer:
 
         self._ensure_character_manager()
         characters = []
+
+        def identity_progress(current, total, status):
+            if self._should_stop():
+                raise _OrganizeCancelled()
+            if progress_callback:
+                percent = 65 + int(current / max(1, total) * 30)
+                progress_callback("characters", status, percent)
+
         try:
-            raw_groups = self._identity_manager.analyze_folder(person_paths) or []
+            raw_groups = self._identity_manager.analyze_folder(
+                person_paths, progress_callback=identity_progress) or []
             for g in raw_groups:
                 if g is None:
                     continue
                 characters.append({"character_id": g.get("character_id", ""), "name": g.get("name", ""), "type": g.get("type", ""), "cover": g.get("cover_image", ""), "images": g.get("images", []), "count": g.get("count", 0)})
+        except _OrganizeCancelled:
+            return {"cancelled": True}
         except Exception as e:
-            print(f"[AIOrganizer] 角色聚合失败: {e}")
+            return {"characters": [], "errors": [f"角色聚合失败: {e}"]}
 
         char_map = {}
         for c in characters:

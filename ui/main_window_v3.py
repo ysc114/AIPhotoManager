@@ -58,6 +58,8 @@ from ui.overview_mixin import _OverviewMixinMixin
 
 # 页面模块方法被拆分到以下 Mixin（main_window_v3.py 仅保留组装）
 from ui.favorites_mixin import _FavoritesMixinMixin
+from ui.media_tasks import _MediaTasksMixin
+from ui.analysis_workers import SingleImageAnalysisWorker
 
 from ui.duplicates_page import DuplicatesPage
 
@@ -87,7 +89,8 @@ def get_human_categories():
 # 主窗口
 # ============================================================
 
-class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixin, QMainWindow):
+class MainWindow(_MediaTasksMixin, _RoleCenterMixinMixin, _OverviewMixinMixin,
+                 _FavoritesMixinMixin, QMainWindow):
 
     # 左侧导航项（顺序即 QStackedWidget 页索引）
     NAV_ITEMS = [
@@ -128,6 +131,8 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         self._path_md5_cache = {}
 
         self.classifier = None
+        self._ai_analysis_worker = None
+        self._ai_analysis_path = None
 
         self.current_image_path = None
         self._photo_detection_context = None
@@ -159,9 +164,12 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         self._gs_shortcuts = []
         self._gs_recents = []
         self._gs_panel_w = 640
+        self._gs_photo_names = None
         # 语义搜索（CLIP 文本）：后台建索引一次后常驻
         self._sem_building = False
         self._sem_worker = None
+        self._sem_query_worker = None
+        self._sem_closing = False
 
         self.init_ui()
 
@@ -422,6 +430,10 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
             qss = self._classic_qss(dark)
         else:
             qss = self._liquid_qss(dark, lg)
+        # Native Windows dialogs can inherit a dark system palette while the
+        # application uses light text styling. Keep their surfaces and controls
+        # on the same palette so task settings and errors stay readable.
+        qss += self._dialog_qss(dark)
         self.setStyleSheet(qss)
 
         # 重绘背景渐变
@@ -446,6 +458,26 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
                     self._load_groups_into_page(key)
                 except Exception:
                     pass
+
+    @staticmethod
+    def _dialog_qss(dark):
+        background = "#232a36" if dark else "#f5f6fa"
+        control = "#303949" if dark else "#ffffff"
+        text = "#e8eef6" if dark else "#2c3e50"
+        border = "#66758a" if dark else "#b8c6d8"
+        return f"""
+            QDialog {{ background-color: {background}; color: {text}; }}
+            QDialog QLabel, QDialog QCheckBox {{ color: {text}; }}
+            QDialog QComboBox, QDialog QAbstractSpinBox, QDialog QLineEdit,
+            QDialog QPushButton {{
+                background-color: {control}; color: {text};
+                border: 1px solid {border}; border-radius: 4px; padding: 4px;
+            }}
+            QDialog QComboBox QAbstractItemView {{
+                background-color: {control}; color: {text};
+                selection-background-color: #527cbd; selection-color: #ffffff;
+            }}
+        """
 
     @staticmethod
     def _liquid_qss(dark, lg):
@@ -1294,12 +1326,16 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
 
     def _start_analyze_selected(self):
         """后台线程执行 analyze_paths（不阻塞 GUI）；完成后刷新各页。"""
-        if self._pending_worker is not None and self._pending_worker.isRunning():
+        if self._pending_worker is not None:
+            if self._pending_worker.isRunning():
+                self._pending_worker.requestInterruption()
+                self._pending_analyze_btn.setEnabled(False)
+                self._pending_status.setText("正在取消，等待当前照片处理结束…")
             return
         if not self._pending_files:
             QMessageBox.information(self, "提示", "请先添加照片或文件夹。")
             return
-        self._pending_analyze_btn.setEnabled(False)
+        self._pending_analyze_btn.setText("取消分析")
         self._pending_progress.setValue(0)
         self._pending_status.setText("正在准备…")
 
@@ -1317,8 +1353,19 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         self._pending_status.setText(f"({current}/{total}) {status}")
 
     def _on_analyze_done(self, result):
-        self._reap_worker(getattr(self, "_pending_worker", None))
+        if not self._reap_worker(getattr(self, "_pending_worker", None)):
+            QTimer.singleShot(100, lambda: self._on_analyze_done(result))
+            return
         self._pending_analyze_btn.setEnabled(True)
+        self._pending_analyze_btn.setText("▶️  分析新照片")
+        self._pending_worker = None
+        if self._sem_closing:
+            return
+        if result.get("cancelled"):
+            self._pending_status.setText("分析已取消；已完成结果保留，可以重新分析剩余照片")
+            if not self._sem_closing:
+                self._refresh_after_ingest()
+            return
         self._pending_progress.setValue(self._pending_progress.maximum())
         self._pending_status.setText("分析完成")
         # 清空已选列表
@@ -1334,11 +1381,15 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
             self._update_visual_index_async()
 
     def _on_analyze_failed(self, err):
-        self._reap_worker(getattr(self, "_pending_worker", None))
+        if not self._reap_worker(getattr(self, "_pending_worker", None)):
+            QTimer.singleShot(100, lambda: self._on_analyze_failed(err))
+            return
         self._pending_analyze_btn.setEnabled(True)
+        self._pending_analyze_btn.setText("▶️  分析新照片")
         self._pending_worker = None
         self._pending_status.setText("分析失败")
-        QMessageBox.critical(self, "分析失败", f"分析新照片时出错：{err}")
+        if not self._sem_closing:
+            QMessageBox.critical(self, "分析失败", f"分析新照片时出错：{err}")
 
     def _show_analyze_summary(self, r):
         dup = r.get("dup_path", 0) + r.get("dup_md5", 0)
@@ -1400,6 +1451,7 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         self._refresh_overview()
         for k in ("fursuit", "person", "character"):
             self._group_page_loaded[k] = False
+        self._gs_photo_names = None
         # 清理预览列表中已删除的照片
         self.image_list = [p for p in self.image_list if os.path.exists(p)]
         if getattr(self, "preview_label", None) and self.image_list:
@@ -1423,7 +1475,7 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         )
 
         self.btn_ai.clicked.connect(
-            self.start_ai_analysis
+            lambda _checked=False: self.start_ai_analysis()
         )
 
         self.btn_search.clicked.connect(
@@ -1496,14 +1548,24 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         else:
             self._open_global_search()
 
-    def _on_global_search_query(self, query):
-        """组件查询回调：用现有只读数据构造分区结果（不写库/不改业务）。"""
+    def _on_global_search_query(self, query, _sem_result=None, _sem_error=None):
+        """组件查询回调：用现有只读数据构造分区结果（不写库/不改业务）。
+
+        _sem_result：后台语义检索回填的 (token, hits)，仅当 token 仍是当前待处理查询时采用。
+        _sem_error：后台语义任务失败时的可见错误文本。
+        """
         self._global_search.set_query(query or "")   # 同步组件内部状态
         q = (query or "").strip().lower()
         if not q:
             self._global_search.set_results([], recent=self._gs_recents)
             return
         sections = []
+        # 后台语义结果：仅当令牌与当前待处理查询一致时采用
+        sem_hits = None
+        if _sem_result is not None:
+            pending = getattr(self, "_sem_pending", None)
+            if pending and pending[0] is _sem_result[0]:
+                sem_hits = _sem_result[1]
 
         # 筛选（与顶部搜索条同一语义）：类型作用于角色，收藏作用于照片/语义
         try:
@@ -1570,7 +1632,14 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         photo_items = []
         if os.path.isdir(photos_dir) and not favorite_only:
             # 只看收藏时统一由 ⭐ 收藏 分区承载，避免同一张照片出现两次
-            for n in sorted(os.listdir(photos_dir)):
+            names = getattr(self, "_gs_photo_names", None)
+            if names is None:
+                names = sorted(
+                    n for n in os.listdir(photos_dir)
+                    if os.path.splitext(n)[1].lower()
+                    in (".jpg", ".jpeg", ".png", ".webp"))
+                self._gs_photo_names = names
+            for n in names:
                 if q in n.lower():
                     p = os.path.join(photos_dir, n).replace("\\", "/")
                     photo_items.append({
@@ -1598,45 +1667,79 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         # 🧠 语义搜索（CLIP 文本 embedding → FAISS；第 2 层第二阶段）
         semantic_items = []
         try:
-            from core.visual_search import get_encoder, get_index
-            s_idx = get_index()
-            if s_idx.count() > 0:
-                enc = get_encoder()
-                if not enc.is_loaded():
-                    # 首次语义搜索要加载 CLIP（约 10s）：放后台预热，
-                    # 完成后由 _on_semantic_build_done 自动重渲染结果，
-                    # 避免主线程卡住整个界面。
+            from core.visual_search import (expand_queries, get_encoder,
+                                            read_index_status)
+            if _sem_error is not None:
+                semantic_items.append({
+                    "icon": "⚠️", "title": "语义搜索失败，按 Enter 重试",
+                    "subtitle": str(_sem_error)[:100], "badge": "语义",
+                    "payload": {"kind": "semantic_retry"},
+                })
+            else:
+                # 只读读取 metadata 状态，不在 UI 线程反序列化 FAISS。
+                # 真正的 get_index() 在建索引/查询 worker 内执行。
+                status = read_index_status()
+                indexed = max(
+                    0, int(status.get("indexed") or 0)
+                    - int(status.get("stale") or 0))
+                state = str(status.get("state") or "missing")
+                if int(status.get("photos_total") or 0) <= 0:
+                    semantic_items.append({
+                        "icon": "🖼️", "title": "暂无照片可进行语义搜索",
+                        "subtitle": "加入照片后可建立语义索引", "badge": "语义",
+                        "payload": {"kind": "hint"},
+                    })
+                elif state != "ready" or indexed <= 0:
+                    # 索引为空/损坏/模型不匹配：后台统一重建或校验，
+                    # 避免在主线程加载 FAISS 或模型。
                     self._start_semantic_build()
                     semantic_items.append({
-                        "icon": "⏳",
-                        "title": "语义模型加载中…（首次约 10 秒）",
+                        "icon": "⏳", "title": "语义索引构建中…（首次）",
+                        "subtitle": "完成后自动刷新结果", "badge": "语义",
+                        "payload": {"kind": "hint"},
+                    })
+                elif self._index_worker_running():
+                    semantic_items.append({
+                        "icon": "⏳", "title": "语义索引更新中…",
                         "subtitle": "完成后自动刷新结果", "badge": "语义",
                         "payload": {"kind": "hint"},
                     })
                 else:
-                    # 只看收藏时先多取候选再筛，避免「收藏外的高分结果先占满 top_k」
-                    hits = s_idx.search_by_text(
-                        q, enc, top_k=(20 if favorite_only else 4))
-                    for r in hits:
-                        if favorite_only and r["path"] not in fav_set:
-                            continue
+                    enc = get_encoder()
+                    if not enc.is_loaded():
+                        # 首次语义搜索要加载 CLIP（约 10s）：放后台预热，
+                        # 完成后由 _on_semantic_build_done 自动重渲染结果。
+                        self._start_semantic_build()
                         semantic_items.append({
-                            "icon": "🧠",
-                            "title": os.path.basename(r["path"]),
-                            "subtitle": f"语义相似 {r['similarity'] * 100:.0f}%",
-                            "badge": "语义",
-                            "payload": {"kind": "photo", "path": r["path"]},
+                            "icon": "⏳",
+                            "title": "语义模型加载中…（首次约 10 秒）",
+                            "subtitle": "完成后自动刷新结果", "badge": "语义",
+                            "payload": {"kind": "hint"},
                         })
-                        if len(semantic_items) >= 4:
-                            break
-            else:
-                # 索引为空：后台构建一次（幂等），完成后自动刷新结果
-                self._start_semantic_build()
-                semantic_items.append({
-                    "icon": "⏳", "title": "语义索引构建中…（首次）",
-                    "subtitle": "完成后自动刷新结果", "badge": "语义",
-                    "payload": {"kind": "hint"},
-                })
+                    elif sem_hits is None:
+                        # 主线程不编码（每次新查询约 200~400ms）→ 后台查询
+                        self._start_semantic_query(
+                            q, expand_queries(q),
+                            top_k=(20 if favorite_only else 4))
+                        semantic_items.append({
+                            "icon": "⏳", "title": "语义检索中…",
+                            "subtitle": "其余分区已出结果，语义部分后台补齐",
+                            "badge": "语义", "payload": {"kind": "hint"},
+                        })
+                    else:
+                        # 只看收藏时先多取候选再筛，避免「收藏外的高分结果先占满 top_k」
+                        for r in sem_hits:
+                            if favorite_only and r["path"] not in fav_set:
+                                continue
+                            semantic_items.append({
+                                "icon": "🧠",
+                                "title": os.path.basename(r["path"]),
+                                "subtitle": f"语义相似 {r['similarity'] * 100:.0f}%",
+                                "badge": "语义",
+                                "payload": {"kind": "photo", "path": r["path"]},
+                            })
+                            if len(semantic_items) >= 4:
+                                break
         except Exception as e:
             semantic_items.append({
                 "icon": "🧠", "title": "语义搜索暂不可用",
@@ -1656,6 +1759,27 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
                 return True
         return False
 
+    def _analysis_task_busy(self, exclude_attr=None):
+        """Prevent concurrent inference/cache writers across UI analysis actions."""
+        for name in ("_ai_analysis_worker", "_scan_worker", "_ai_pick_worker",
+                     "_pending_worker", "_batch_analysis_worker"):
+            if name == exclude_attr:
+                continue
+            worker = getattr(self, name, None)
+            try:
+                if worker is not None and worker.isRunning():
+                    return True
+            except RuntimeError:
+                continue
+        for state in (getattr(self, "_group_pages", None) or {}).values():
+            worker = state.get("pq_worker") if isinstance(state, dict) else None
+            try:
+                if worker is not None and worker.isRunning():
+                    return True
+            except RuntimeError:
+                continue
+        return False
+
     @staticmethod
     def _reap_worker(worker):
         """等后台线程真正退出后再丢引用（避免 QThread 析构时仍在运行）。"""
@@ -1665,27 +1789,36 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
     # 关窗前必须停掉的后台线程（QThread 未结束就退出 → Windows 0xC0000409）
     _BG_WORKER_ATTRS = (
         "_health_worker", "_pending_worker", "_visual_index_worker",
-        "_sem_worker", "_similar_worker", "_scan_worker", "_ai_pick_worker",
+        "_sem_worker", "_sem_query_worker", "_similar_worker",
+        "_scan_worker", "_ai_pick_worker", "_ai_analysis_worker", "_batch_analysis_worker",
+        "_video_worker", "_upscale_worker",
     )
 
     def _shutdown_background_workers(self, timeout_ms=3000):
-        """停掉自己启动的后台线程（等不到就放弃，不阻断关窗）。"""
-        self._ui_ready = False
+        """停掉自己启动的后台线程；未退出的线程保留引用并阻止关窗。"""
+        self._sem_closing = True
+        all_stopped = True
 
         def _stop(worker):
             try:
                 if worker is not None and worker.isRunning():
                     worker.requestInterruption()
-                    worker.wait(int(timeout_ms))
+                    if not worker.wait(int(timeout_ms)):
+                        # 不清引用、不销毁仍运行的 QThread；拒绝本次关窗，
+                        # 避免无限阻塞 UI，也避免 Windows 原生崩溃。
+                        return False
+                return worker is None or not worker.isRunning()
             except Exception:
-                pass
+                return False
 
         for name in self._BG_WORKER_ATTRS:
             worker = getattr(self, name, None)
             if worker is None:
                 continue
-            _stop(worker)
-            setattr(self, name, None)
+            if _stop(worker):
+                setattr(self, name, None)
+            else:
+                all_stopped = False
 
         # 角色页「AI 精选」：每个分组页各持一个 worker
         for state in (getattr(self, "_group_pages", None) or {}).values():
@@ -1693,21 +1826,32 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
                 continue
             worker = state.get("pq_worker")
             if worker is not None:
-                _stop(worker)
-                state["pq_worker"] = None
+                if _stop(worker):
+                    state["pq_worker"] = None
+                else:
+                    all_stopped = False
 
         # 子页面自持线程（重复页视觉扫描）：页面自己实现 shutdown_workers
         page = getattr(self, "duplicates_page", None)
         shutdown = getattr(page, "shutdown_workers", None)
         if callable(shutdown):
             try:
-                shutdown(timeout_ms)
+                if shutdown(timeout_ms) is False:
+                    all_stopped = False
             except Exception:
-                pass
+                all_stopped = False
+        if all_stopped:
+            self._ui_ready = False
+        else:
+            self._sem_closing = False
+        return all_stopped
 
     def closeEvent(self, event):
         """关窗：先收尾后台线程，避免退出期原生崩溃。"""
-        self._shutdown_background_workers()
+        if not self._shutdown_background_workers():
+            event.ignore()
+            self.statusBar().showMessage("后台任务仍在退出，请稍后关闭", 5000)
+            return
         super().closeEvent(event)
 
     def _update_visual_index_async(self):
@@ -1768,6 +1912,79 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
             except Exception as e:
                 print(f"[视觉索引] 设置页状态刷新失败: {e}")
 
+    def _start_semantic_query(self, query_text, texts, top_k):
+        """后台发起语义检索（主线程不编码：每次新查询约 200~400ms）。
+
+        已有任务在跑时不排队：只记录最新查询，done 回调里自动补跑最新一次。
+        """
+        token = object()
+        self._sem_pending = (token, str(query_text or ""), list(texts or []),
+                             int(top_k))
+        w = getattr(self, "_sem_query_worker", None)
+        if w is not None and w.isRunning():
+            # 尽可能中断旧查询；旧线程结束前不并发启动新线程，
+            # 避免共享 OpenCLIP/FAISS 实例同时读写。
+            try:
+                w.requestInterruption()
+            except Exception:
+                pass
+            return False
+        self._spawn_semantic_query()
+        return True
+
+    def _spawn_semantic_query(self):
+        pending = getattr(self, "_sem_pending", None)
+        if not pending or getattr(self, "_sem_closing", False):
+            return
+        token, _q, texts, top_k = pending
+        w = _SemanticQueryWorker(token, texts, top_k)
+        w.done.connect(self._on_semantic_query_done)
+        w.failed.connect(self._on_semantic_query_failed)
+        cancelled = getattr(w, "cancelled", None)
+        if cancelled is not None:
+            cancelled.connect(self._on_semantic_query_cancelled)
+        self._sem_query_worker = w
+        w.start()
+
+    def _on_semantic_query_done(self, token, hits):
+        self._reap_worker(getattr(self, "_sem_query_worker", None))
+        self._sem_query_worker = None
+        pending = getattr(self, "_sem_pending", None)
+        if not pending or pending[0] is not token:
+            self._spawn_semantic_query()      # 有更新的查询 → 立刻补跑
+            return
+        try:
+            cur = (self._global_search.query() or "").strip().lower()
+        except Exception:
+            cur = pending[1]
+        if cur != pending[1]:
+            return                            # 面板查询已改，丢弃旧结果
+        self._on_global_search_query(pending[1], _sem_result=(token, hits))
+
+    def _on_semantic_query_cancelled(self, token):
+        """旧查询被中断后，仅补跑当前 pending 查询。"""
+        self._reap_worker(getattr(self, "_sem_query_worker", None))
+        self._sem_query_worker = None
+        pending = getattr(self, "_sem_pending", None)
+        if pending and pending[0] is not token:
+            self._spawn_semantic_query()
+
+    def _on_semantic_query_failed(self, token, err):
+        self._reap_worker(getattr(self, "_sem_query_worker", None))
+        self._sem_query_worker = None
+        pending = getattr(self, "_sem_pending", None)
+        if not pending or pending[0] is not token:
+            self._spawn_semantic_query()
+            return
+        err_text = str(err)
+        print(f"[语义搜索] 失败：{err_text}")
+        if "索引加载失败" in err_text:
+            # 只清理可重建的视觉搜索缓存，不触碰照片、数据库或角色数据。
+            self._reset_semantic_index_cache()
+            self._start_semantic_build()
+        self._on_global_search_query(
+            pending[1], _sem_result=(token, []), _sem_error=err_text)
+
     def _start_semantic_build(self):
         """后台构建/增量更新视觉索引（首次全量，之后增量秒级）。"""
         if getattr(self, "_sem_building", False):
@@ -1779,8 +1996,19 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         w.progress_updated.connect(self._on_visual_index_progress)
         w.finished_build.connect(self._on_semantic_build_done)
         w.failed.connect(self._on_semantic_build_failed)
+        w.cancelled.connect(self._on_semantic_build_cancelled)
         self._sem_worker = w
         w.start()
+
+    @staticmethod
+    def _reset_semantic_index_cache():
+        """清理损坏的视觉索引文件，下一次后台任务会重新建立。"""
+        try:
+            from core.visual_search import clear_index_files, reset_index
+            reset_index()
+            clear_index_files()
+        except Exception as e:
+            print(f"[语义搜索] 清理损坏索引失败：{e}")
 
     def _on_semantic_build_done(self, stats=None):
         self._reap_worker(getattr(self, "_sem_worker", None))
@@ -1789,7 +2017,13 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         self._notify_index_updated(stats or {})
         # 索引就绪：用当前查询重新渲染（自动出现语义结果）
         if self._global_search is not None and self._global_search.isVisible():
-            self._on_global_search_query(self._global_search.query())
+            stats = stats or {}
+            if int(stats.get("failed") or 0) and not int(stats.get("new") or 0):
+                self._on_global_search_query(
+                    self._global_search.query(),
+                    _sem_error=(f"索引构建失败：{stats['failed']} 张照片编码失败"))
+            else:
+                self._on_global_search_query(self._global_search.query())
 
     def _on_semantic_build_failed(self, err):
         self._reap_worker(getattr(self, "_sem_worker", None))
@@ -1797,12 +2031,23 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         self._sem_worker = None
         print(f"[语义搜索] 索引构建失败: {err}")
         self._refresh_settings_index_status()
+        if self._global_search is not None and self._global_search.isVisible():
+            self._on_global_search_query(
+                self._global_search.query(), _sem_error=str(err))
+
+    def _on_semantic_build_cancelled(self):
+        self._reap_worker(getattr(self, "_sem_worker", None))
+        self._sem_building = False
+        self._sem_worker = None
 
     def _on_global_result_selected(self, item):
         """结果打开：角色 → 角色详情；照片/收藏/文件 → 照片页预览。"""
         payload = item.get("payload") or {}
         title = str(item.get("title") or "").strip()
         kind = payload.get("kind")
+        if kind == "semantic_retry":
+            self._on_global_search_query(self._global_search.query())
+            return
         if kind == "hint":
             return  # 提示行不可打开
         if title:
@@ -1824,6 +2069,7 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         for key in ("fursuit", "person", "character"):
             if self._group_page_loaded.get(key):
                 self._load_groups_into_page(key)
+        self._gs_photo_names = None
         # 照片页：清空当前列表 + 重置自动载入标记 → 下一步会重扫 photos/
         self._photos_autoload_done = False
         if getattr(self, "_ui_ready", False) and not getattr(
@@ -1882,6 +2128,7 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
             text = (labels[i] if labels and i < len(labels)
                     else os.path.basename(path))
             item = QListWidgetItem(text)
+            item.setData(Qt.UserRole, path)
             self.image_list_widget.addItem(item)
             self._set_photo_list_icon(item, path)
         if paths:
@@ -2067,13 +2314,17 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
 
     def show_preview(self, row):
 
-        if row < 0 or row >= len(self.image_list):
+        item = self.image_list_widget.item(row) if row >= 0 else None
+        if item is None:
             # 列表为空/越界：没有当前照片，收藏按钮回到提示态
             self._preview_path = None
             self._sync_favorite_button("")
             return
 
-        path = self.image_list[row]
+        path = item.data(Qt.UserRole) or (
+            self.image_list[row] if row < len(self.image_list) else None)
+        if not path:
+            return
         resolved_path = self._resolve_display_path(path)
         context = self._photo_detection_context or {}
         has_context = (
@@ -2118,6 +2369,19 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
                     f"路径：{path}"
                     f"{extra}"
                 )
+                if os.path.basename(path).startswith("video_"):
+                    from core.video_frames import video_source_for_frame
+                    manifest = _project_root / "cache" / "video_frames.json"
+                    try:
+                        source = video_source_for_frame(path, manifest)
+                    except Exception:
+                        source = None
+                    if source:
+                        second = source["time_ms"] / 1000
+                        self.default_info_label.setText(
+                            self.default_info_label.text()
+                            + f"\n视频来源：{source['source']}"
+                            + f"\n视频时间：{second:.1f} 秒")
         except Exception as e:
             if self.default_info_label.isVisible():
                 self.default_info_label.setText(str(e))
@@ -2233,7 +2497,7 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         """)
         return separator
 
-    def start_ai_analysis(self):
+    def start_ai_analysis(self, _analysis=None):
 
         if not self.image_list:
             QMessageBox.information(
@@ -2241,6 +2505,13 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
                 "提示",
                 "请先打开图片文件夹"
             )
+            return
+
+        worker = getattr(self, "_ai_analysis_worker", None)
+        if _analysis is None and worker is not None:
+            if worker.isRunning():
+                worker.requestInterruption()
+                self.statusBar().showMessage("正在取消 AI 分析，等待当前推理结束…")
             return
 
         row = self.image_list_widget.currentRow()
@@ -2253,14 +2524,30 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
             )
             return
 
-        image_path = self.image_list[row]
+        item = self.image_list_widget.item(row)
+        image_path = item.data(Qt.UserRole) if item is not None else None
+        if not image_path:
+            image_path = self.image_list[row]
         self.current_image_path = image_path
 
-        try:
-            if self.classifier is None:
-                self.classifier = AIClassifier()
+        if _analysis is None:
+            worker = SingleImageAnalysisWorker(image_path)
+            worker.done.connect(self._on_single_ai_analysis_done)
+            worker.failed.connect(self._on_single_ai_analysis_failed)
+            worker.cancelled.connect(self._on_single_ai_analysis_cancelled)
+            self._ai_analysis_worker = worker
+            self._ai_analysis_path = image_path
+            self.btn_ai.setText("取消 AI 分析")
+            self.btn_ai.setToolTip("取消当前图片分析")
+            self.statusBar().showMessage("正在后台分析当前照片…")
+            worker.start()
+            return
 
-            result = self.classifier.analyze(image_path)
+        result_path, result = _analysis
+        if result_path != image_path or self._preview_path != result_path:
+            return
+
+        try:
 
             self.clear_ai_panel()
 
@@ -2493,6 +2780,39 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
                 str(e)
             )
 
+    def _finish_single_ai_worker(self):
+        worker = getattr(self, "_ai_analysis_worker", None)
+        if not self._reap_worker(worker):
+            return False
+        self._ai_analysis_worker = None
+        self._ai_analysis_path = None
+        self.btn_ai.setText("🤖 AI分析")
+        self.btn_ai.setToolTip("")
+        return True
+
+    def _on_single_ai_analysis_done(self, path, result):
+        if not self._finish_single_ai_worker():
+            QTimer.singleShot(100, lambda: self._on_single_ai_analysis_done(path, result))
+            return
+        if not getattr(self, "_sem_closing", False) and self._preview_path == path:
+            self.start_ai_analysis((path, result))
+        else:
+            self.statusBar().showMessage("AI 分析完成；当前预览已切换", 5000)
+
+    def _on_single_ai_analysis_failed(self, path, error):
+        if not self._finish_single_ai_worker():
+            QTimer.singleShot(100, lambda: self._on_single_ai_analysis_failed(path, error))
+            return
+        if not getattr(self, "_sem_closing", False):
+            QMessageBox.critical(self, "AI 分析失败", f"无法分析照片：{error}")
+
+    def _on_single_ai_analysis_cancelled(self, path):
+        if not self._finish_single_ai_worker():
+            QTimer.singleShot(100, lambda: self._on_single_ai_analysis_cancelled(path))
+            return
+        if not getattr(self, "_sem_closing", False):
+            self.statusBar().showMessage("AI 分析已取消", 5000)
+
     @staticmethod
     def _same_photo(p1, p2):
         """两个路径是否指向同一张照片（容忍斜杠方向混用、相对/绝对路径）。"""
@@ -2571,7 +2891,9 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         )
 
     def auto_classify(self):
-
+        if self._analysis_task_busy(exclude_attr="_batch_analysis_worker"):
+            self.statusBar().showMessage("批量分析正在进行，请先完成或取消当前任务")
+            return
         if not self.image_list:
             QMessageBox.information(
                 self,
@@ -2603,107 +2925,13 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         if reply != QMessageBox.Yes:
             return
 
-        from core.auto_organizer import auto_organize
-
-        progress_dialog = QDialog(self)
-        progress_dialog.setWindowTitle("自动分类进度")
-        progress_dialog.setFixedSize(450, 180)
-        progress_dialog.setModal(True)
-
-        dialog_layout = QVBoxLayout(progress_dialog)
-
-        self.progress_label = QLabel("准备开始...")
-        self.progress_label.setWordWrap(True)
-        self.progress_label.setStyleSheet("""
-            font-size: 14px;
-            color: #333;
-            padding: 15px;
-        """)
-        dialog_layout.addWidget(self.progress_label)
-
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setMinimum(0)
-        self.progress_bar.setMaximum(100)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setTextVisible(True)
-        self.progress_bar.setStyleSheet("""
-            QProgressBar {
-                height: 24px;
-                border-radius: 12px;
-                background: #e0e0e0;
-                border: none;
-            }
-            QProgressBar::chunk {
-                background: #0078D4;
-                border-radius: 12px;
-            }
-        """)
-        dialog_layout.addWidget(self.progress_bar)
-
-        progress_dialog.show()
-        QApplication.processEvents()
-
-        def on_progress(current, total, status_text):
-            percent = int(current / total * 100) if total > 0 else 0
-            self.progress_bar.setValue(percent)
-            self.progress_label.setText(
-                f"进度：{current}/{total}\n\n{status_text}"
-            )
-            QApplication.processEvents()
-
-        try:
-            stats = auto_organize(
-                self.image_list,
-                target_folder,
-                mode="copy",
-                remove_duplicates=True,
-                progress_callback=on_progress
-            )
-
-            progress_dialog.close()
-
-            report = "自动分类完成！\n\n"
-            report += f"✅ 成功：{stats['success']} 张\n"
-            report += f"💾 缓存命中：{stats.get('cache_hits', 0)} 张\n"
-            report += f"🔄 跳过重复：{stats.get('duplicates_skipped', 0)} 张\n"
-            report += f"❌ 失败：{stats['failed']} 张\n\n"
-
-            if stats["categories"]:
-                report += "📊 分类统计：\n"
-                for cat, count in sorted(
-                    stats["categories"].items(),
-                    key=lambda x: x[1],
-                    reverse=True
-                ):
-                    report += f"  【{cat}】：{count} 张\n"
-
-            if stats["errors"]:
-                report += "\n⚠️ 错误详情（前5条）：\n"
-                for path, err in stats["errors"][:5]:
-                    report += f"  {os.path.basename(path)}：{err}\n"
-
-            QMessageBox.information(
-                self,
-                "自动分类完成",
-                report
-            )
-
-            self.statusBar().showMessage(
-                f"自动分类完成，成功 {stats['success']} 张，"
-                f"缓存命中 {stats.get('cache_hits', 0)} 张，"
-                f"跳过 {stats.get('duplicates_skipped', 0)} 张重复"
-            )
-
-        except Exception as e:
-            progress_dialog.close()
-            QMessageBox.critical(
-                self,
-                "自动分类失败",
-                str(e)
-            )
+        from ui.batch_analysis import start_batch_analysis
+        start_batch_analysis(self, "classify", self.image_list, target_folder)
 
     def ai_organize(self):
-
+        if self._analysis_task_busy(exclude_attr="_batch_analysis_worker"):
+            self.statusBar().showMessage("批量分析正在进行，请先完成或取消当前任务")
+            return
         if not self.image_list:
             QMessageBox.information(
                 self,
@@ -2727,111 +2955,8 @@ class MainWindow(_RoleCenterMixinMixin, _OverviewMixinMixin, _FavoritesMixinMixi
         if reply != QMessageBox.Yes:
             return
 
-        from core.ai_organizer import AIOrganizer
-
-        progress_dialog = QDialog(self)
-        progress_dialog.setWindowTitle("AI智能整理进度")
-        progress_dialog.setFixedSize(450, 180)
-        progress_dialog.setModal(True)
-
-        dialog_layout = QVBoxLayout(progress_dialog)
-
-        self.progress_label = QLabel("准备开始...")
-        self.progress_label.setWordWrap(True)
-        self.progress_label.setStyleSheet("""
-            font-size: 14px;
-            color: #333;
-            padding: 15px;
-        """)
-        dialog_layout.addWidget(self.progress_label)
-
-        self.progress_bar = QProgressBar()
-        self.progress_bar.setMinimum(0)
-        self.progress_bar.setMaximum(100)
-        self.progress_bar.setValue(0)
-        self.progress_bar.setTextVisible(True)
-        self.progress_bar.setStyleSheet("""
-            QProgressBar {
-                height: 24px;
-                border-radius: 12px;
-                background: #e0e0e0;
-                border: none;
-            }
-            QProgressBar::chunk {
-                background: #0078D4;
-                border-radius: 12px;
-            }
-        """)
-        dialog_layout.addWidget(self.progress_bar)
-
-        progress_dialog.show()
-        QApplication.processEvents()
-
-        self._organizer = AIOrganizer()
-
-        def on_progress(step, message, percent):
-            self.progress_bar.setValue(percent)
-            self.progress_label.setText(message)
-            QApplication.processEvents()
-
-        try:
-            result = self._organizer.organize_folder(
-                self.image_list,
-                progress_callback=on_progress
-            )
-
-            if result is None:
-                raise RuntimeError("AIOrganizer 返回了空结果")
-
-            progress_dialog.close()
-
-            report = "AI智能整理完成！\n\n"
-            report += "📊 分类统计：\n"
-            for cat, count in result.get("categories", {}).items():
-                report += f"  【{cat}】：{count} 张\n"
-
-            characters = result.get("characters", [])
-            if characters:
-                real_count = sum(1 for c in characters if c.get("type") == "real_person")
-                fursuit_count = sum(1 for c in characters if c.get("type") == "fursuit_character")
-                report += f"\n👤 人物分组：{len(characters)} 组\n"
-                report += f"  真人分组：{real_count} 组\n"
-                report += f"  兽装角色分组：{fursuit_count} 组\n"
-
-            QMessageBox.information(
-                self,
-                "AI智能整理完成",
-                report
-            )
-
-            self.statusBar().showMessage(
-                f"AI智能整理完成，{result['total']} 张图片，{len(characters)} 个人物分组"
-            )
-
-        except Exception as e:
-            progress_dialog.close()
-            QMessageBox.critical(
-                self,
-                "AI智能整理失败",
-                str(e)
-            )
-
-    def super_resolution(self):
-
-        QMessageBox.information(
-            self,
-            "AI超分",
-            "AI超分功能正在开发中"
-        )
-
-    def extract_video_frames(self):
-
-        QMessageBox.information(
-            self,
-            "视频抽帧",
-            "视频抽帧功能正在开发中"
-        )
-
+        from ui.batch_analysis import start_batch_analysis
+        start_batch_analysis(self, "organize", self.image_list)
 
 if __name__ == "__main__":
 
@@ -2864,21 +2989,37 @@ class _AnalyzeWorker(QThread):
         self._paths = list(paths or [])
 
     def run(self):
-        from core.identity import IdentityManager
-        mgr = IdentityManager()
+        mgr = None
+        result = None
+        error = None
         try:
+            from core.identity import IdentityManager
+            if self.isInterruptionRequested():
+                self.finished_ok.emit({"cancelled": True, "completed": 0})
+                return
+            mgr = IdentityManager()
             self.progress_updated.emit(
                 0, len(self._paths),
                 "准备中：加载 AI 模型（CLIP / Fursee 首次约 1 分钟）…")
             result = mgr.analyze_paths(
                 self._paths,
                 progress_callback=lambda i, t, s: self.progress_updated.emit(i, t, s),
+                cancelled=self.isInterruptionRequested,
             )
-            self.finished_ok.emit(result)
         except Exception as e:
-            self.failed.emit(str(e))
+            error = str(e)
         finally:
-            mgr.close()
+            if mgr is not None:
+                try:
+                    mgr.close()
+                except Exception as e:
+                    error = error or str(e)
+        # Fursee shutdown can outlast the UI's wait budget. Notify only after
+        # releasing the manager, so handlers never drop a still-cleaning worker.
+        if error is not None:
+            self.failed.emit(error)
+        elif result is not None:
+            self.finished_ok.emit(result)
 
 
 class _ScanDirWorker(QThread):
@@ -2897,20 +3038,34 @@ class _ScanDirWorker(QThread):
         super().__init__(parent)
 
     def run(self):
-        from core.identity import IdentityManager
-        mgr = IdentityManager()
+        mgr = None
+        result = None
+        error = None
         try:
+            from core.identity import IdentityManager
+            if self.isInterruptionRequested():
+                self.finished_ok.emit({"cancelled": True, "completed": 0})
+                return
+            mgr = IdentityManager()
             self.progress_updated.emit(
                 0, 0,
                 "准备中：加载 AI 模型（CLIP / Fursee 首次约 1 分钟）…")
             result = mgr.analyze_new_photos(
                 progress_callback=lambda i, t: self.progress_updated.emit(i, t, ""),
+                cancelled=self.isInterruptionRequested,
             )
-            self.finished_ok.emit(result)
         except Exception as e:
-            self.failed.emit(str(e))
+            error = str(e)
         finally:
-            mgr.close()
+            if mgr is not None:
+                try:
+                    mgr.close()
+                except Exception as e:
+                    error = error or str(e)
+        if error is not None:
+            self.failed.emit(error)
+        elif result is not None:
+            self.finished_ok.emit(result)
 
 
 class PhotoQualityWorker(QThread):
@@ -2994,18 +3149,71 @@ class _HealthCheckWorker(QThread):
             self.failed.emit(str(e))
 
 
+class _SemanticQueryWorker(QThread):
+    """后台执行语义检索（中文扩展 + 文本编码 + FAISS）。
+
+    主线程编码一次新查询约 200~400ms（CPU CLIP），转到后台后面板不再卡顿；
+    结果带 token，主线程只接受与当前查询匹配的一次。
+    """
+
+    done = Signal(object, object)      # (token, hits)
+    failed = Signal(object, str)
+    cancelled = Signal(object)         # token
+
+    def __init__(self, token, texts, top_k, parent=None):
+        super().__init__(parent)
+        self._token = token
+        self._texts = list(texts or [])
+        self._top_k = int(top_k)
+
+    def run(self):
+        try:
+            if self.isInterruptionRequested():
+                self.cancelled.emit(self._token)
+                return
+            from core.visual_search import get_encoder, get_index
+            # get_index() may deserialize a large FAISS file; it is deliberately
+            # inside this worker so the first semantic query cannot block Qt.
+            index = get_index()
+            load_error = getattr(index, "load_error", None)
+            if load_error:
+                raise RuntimeError(f"索引加载失败：{load_error}")
+            if self.isInterruptionRequested():
+                self.cancelled.emit(self._token)
+                return
+            encoder = get_encoder()
+            if self.isInterruptionRequested():
+                self.cancelled.emit(self._token)
+                return
+            hits = index.search_by_text(
+                self._texts, encoder, top_k=self._top_k)
+            if self.isInterruptionRequested():
+                self.cancelled.emit(self._token)
+                return
+            self.done.emit(self._token, hits)
+        except Exception as e:
+            if self.isInterruptionRequested():
+                self.cancelled.emit(self._token)
+            else:
+                self.failed.emit(self._token, str(e))
+
+
 class _SemanticBuildWorker(QThread):
     """后台构建/增量更新视觉索引（语义搜索前置；不触碰 identity_db）。"""
 
     progress_updated = Signal(int, int)   # (done, total)
     finished_build = Signal(dict)         # 增量统计 {new, skipped_existing, ...}
     failed = Signal(str)
+    cancelled = Signal()
 
     _EXTS = {".jpg", ".jpeg", ".png", ".webp"}
 
     def run(self):
         import os
         try:
+            if self.isInterruptionRequested():
+                self.cancelled.emit()
+                return
             from core.visual_search import get_encoder, get_index
             from core.visual_search.search import default_photos_dir
             photos_dir = default_photos_dir()
@@ -3015,10 +3223,31 @@ class _SemanticBuildWorker(QThread):
                     os.path.join(photos_dir, n) for n in os.listdir(photos_dir)
                     if os.path.splitext(n)[1].lower() in self._EXTS
                 )
+            if self.isInterruptionRequested():
+                self.cancelled.emit()
+                return
             index = get_index()
+
+            def _progress(done, total):
+                if self.isInterruptionRequested():
+                    raise _SemanticBuildCancelled()
+                self.progress_updated.emit(done, total)
+
             stats = index.add_images(
                 files, get_encoder(),
-                progress_cb=lambda d, t: self.progress_updated.emit(d, t))
+                progress_cb=_progress)
+            if self.isInterruptionRequested():
+                self.cancelled.emit()
+                return
             self.finished_build.emit(dict(stats or {}))
+        except _SemanticBuildCancelled:
+            self.cancelled.emit()
         except Exception as e:
-            self.failed.emit(str(e))
+            if self.isInterruptionRequested():
+                self.cancelled.emit()
+            else:
+                self.failed.emit(str(e))
+
+
+class _SemanticBuildCancelled(Exception):
+    """内部控制流：在安全的图片批次边界停止索引构建。"""

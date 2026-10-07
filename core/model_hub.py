@@ -45,6 +45,7 @@ class ModelHub:
         self._clip = None
         self._yolo = None
         self._insightface = None
+        self._upscaler = None
         # insightface 加载失败时置 False，避免每次重试（沿用 embedding.py 原策略）
         self._insightface_failed = False
         # 进程内存级检测缓存：normalized path -> list[Detection]
@@ -54,12 +55,14 @@ class ModelHub:
         self._clip_lock = threading.Lock()
         self._yolo_lock = threading.Lock()
         self._insightface_lock = threading.Lock()
+        self._upscaler_lock = threading.Lock()
         self._cache_lock = threading.Lock()
         # 可注入的工厂（测试时替换为 fake，不加载真实权重）
         self._factories = {
             "clip": self._factory_clip,
             "yolo": self._factory_yolo,
             "insightface": self._factory_insightface,
+            "upscaler": self._factory_upscaler,
         }
 
     # ============================================================
@@ -109,6 +112,10 @@ class ModelHub:
         app.prepare(ctx_id=0, det_size=(640, 640))
         return app
 
+    def _factory_upscaler(self, device):
+        from core.super_resolution import load_upscaler
+        return load_upscaler()
+
     # ============================================================
     # 公共访问接口
     # ============================================================
@@ -154,6 +161,14 @@ class ModelHub:
                         self._insightface_failed = True
                         return None
         return self._insightface
+
+    def get_upscaler(self):
+        """Lazily load the tiled CPU upscaler; never reserve photo-analysis VRAM."""
+        if self._upscaler is None:
+            with self._upscaler_lock:
+                if self._upscaler is None:
+                    self._upscaler = self._factories["upscaler"]("cpu")
+        return self._upscaler
 
     # ============================================================
     # 检测缓存（消除 AIClassifier 与 IdentityEmbedding 重复检测）
@@ -201,6 +216,8 @@ class ModelHub:
         with self._insightface_lock:
             self._insightface = None
             self._insightface_failed = False
+        with self._upscaler_lock:
+            self._upscaler = None
         with self._cache_lock:
             self._detection_cache = {}
         with self._device_lock:

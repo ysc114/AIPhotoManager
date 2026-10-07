@@ -3,7 +3,7 @@
 AI 照片管理系统：本地 + NAS 照片管理，AI 自动分类、兽装/人物角色识别与分组、多人合照归属、角色照片墙与完整原图预览。
 
 > 本项目是个人照片库的**生产系统**，代码经过多轮生产环境验证。开发时请严格遵守文末「开发铁律」。
-> 隐私声明：照片、数据库、模型权重均被 `.gitignore` 排除，**仓库中不含任何私人数据**。
+> 隐私声明：照片、数据库与分析模型权重均被 `.gitignore` 排除，**仓库中不含任何私人数据**。仅附带公开的超分示例权重。
 
 ---
 
@@ -26,6 +26,8 @@ AI 照片管理系统：本地 + NAS 照片管理，AI 自动分类、兽装/人
 ## 一、功能概览
 
 - **照片管理**：本地 photos/ 目录扫描、入库、预览（完整原图）；**首次进入照片页自动载入 photos/ 全库**（列表已有内容或已载入过则不动，实测 194 张 ~0.18s，缩略图后台补齐）
+- **视频抽帧**：照片页选择一个或多个常见格式视频，设置时间间隔；后台抽帧并显示进度，可取消、续跑和跳过已处理视频。JPEG 输出到 `photos/`，来源与时间记录在 `cache/video_frames.json`，可进入待处理 AI 分析、分类、收藏和搜索；原视频只读。
+- **AI 图片超分**：照片页对当前照片或当前列表批量执行 2 倍/3 倍超分；后台分块 CPU 推理，可取消，单张失败不影响其他照片。独立 PNG 输出到 `photos/`，记录在 `cache/super_resolution.json`，可进入待处理分析；原图只读。2 倍由 3 倍模型结果缩放得到，模型来源与校验值见 `models/README.md`。
 - **AI 分类**：L1 粗分类（CLIP）→ 路由（`fursuit` 兽装 / `person` 人物 / `None` 其他）
 - **Fursee 兽装识别**：YOLO 主体检测 + 512D 归一化 embedding（独立 worker 进程）
 - **角色分组**：DBSCAN 聚类 + **Incremental Assignment 增量分配**（新照片只加入/新建，不拆散已有组）
@@ -140,6 +142,7 @@ AIPhotoManager/
 | 组件 | 环境 | 说明 |
 |---|---|---|
 | 主程序 | Python 3.10 | PySide6 / numpy / scikit-learn / Pillow / torch(CUDA 可选) |
+| 视觉/语义搜索 | 同一 Python 3.10 环境 | `faiss-cpu`（或已验证兼容的 FAISS 构建）+ OpenCLIP；缺少 FAISS 时搜索索引功能不可用，但普通照片管理不受影响 |
 | Fursee worker | conda `fursee`（Python 3.12.13）| torch cu128 + transformers==**5.14.1**（唯一兼容版；4.56 会静默随机初始化）+ ultralytics |
 | 人脸（可选） | Python 3.10 | insightface + onnxruntime（`buffalo_l` 模型） |
 

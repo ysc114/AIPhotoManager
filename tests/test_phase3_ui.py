@@ -75,6 +75,38 @@ class Phase3UiTests(unittest.TestCase):
         self.assertIn("AI精选", items[1])
         self.assertIn("重复照片", items[9])
 
+    def test_switch_page_dismisses_search_bar_results(self):
+        self.window.show()
+        search_bar = self.window.search_bar
+        search_bar._render_results({}, "missing")
+        search_bar._show_panel()
+        search_bar._debounce.start()
+        self.assertTrue(search_bar._panel.isVisible())
+
+        self.window._switch_page(6)
+
+        self.assertEqual(self.window.content_stack.currentWidget(),
+                         self.window.favorites_page)
+        self.assertFalse(search_bar._panel.isVisible())
+        self.assertFalse(search_bar._debounce.isActive())
+
+    def test_switch_page_dismisses_global_search_panel(self):
+        self.window.show()
+        panel = self.window._global_search
+        panel.show_panel()
+        self.assertTrue(panel.isVisible())
+
+        self.window._switch_page(6)
+
+        self.assertEqual(self.window.content_stack.currentWidget(),
+                         self.window.favorites_page)
+        from PySide6.QtTest import QTest
+        from time import monotonic
+        deadline = monotonic() + 2
+        while panel.isVisible() and monotonic() < deadline:
+            QTest.qWait(20)
+        self.assertFalse(panel.isVisible())
+
     def test_photo_page_favorite_button(self):
         btns = [b.text() for b in self.window.photo_page.findChildren(QPushButton)]
         self.assertIn("⭐ 收藏当前", btns)

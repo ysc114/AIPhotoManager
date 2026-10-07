@@ -92,6 +92,7 @@ class VisualSearchIndex:
         self._entries = []          # [{id, path, md5, size, mtime_ns}]
         self._md5_set = set()
         self._loaded = False
+        self._load_error = None
         self._load()
 
     # --------------------------------------------------------
@@ -124,6 +125,7 @@ class VisualSearchIndex:
                     meta = json.load(fh)
             except (OSError, ValueError, RuntimeError) as e:
                 print(f"[visual_search] 索引加载失败，视为空索引: {e}")
+                self._load_error = str(e)
                 self._index = None
                 self._entries = []
                 self._model = None
@@ -141,6 +143,11 @@ class VisualSearchIndex:
                     self._save()
                 except Exception as e:
                     print(f"[visual_search] 旧索引格式升级失败（忽略）: {e}")
+
+    @property
+    def load_error(self):
+        """索引文件加载错误；缺失索引不是错误。"""
+        return self._load_error
 
     def _save(self):
         self.dir.mkdir(parents=True, exist_ok=True)
@@ -356,17 +363,18 @@ class VisualSearchIndex:
 
     def search(self, query_vector, top_k=20):
         """按归一化向量搜索：返回 [(entry, similarity)] 降序。"""
-        if self._index is None or self._index.ntotal == 0:
-            return []
-        q = np.asarray(query_vector, dtype=np.float32).reshape(1, -1)
-        k = min(int(top_k), int(self._index.ntotal))
-        D, I = self._index.search(q, k)
-        out = []
-        for j in range(k):
-            idx = int(I[0][j])
-            if 0 <= idx < len(self._entries):
-                out.append((self._entries[idx], float(D[0][j])))
-        return out
+        with self._lock:
+            if self._index is None or self._index.ntotal == 0:
+                return []
+            q = np.asarray(query_vector, dtype=np.float32).reshape(1, -1)
+            k = min(int(top_k), int(self._index.ntotal))
+            D, I = self._index.search(q, k)
+            out = []
+            for j in range(k):
+                idx = int(I[0][j])
+                if 0 <= idx < len(self._entries):
+                    out.append((self._entries[idx], float(D[0][j])))
+            return out
 
     @staticmethod
     def _is_alive(entry):
@@ -413,6 +421,10 @@ class VisualSearchIndex:
         items = [str(t).strip() for t in (texts or []) if str(t or "").strip()]
         if not items or self._index is None or self._index.ntotal == 0:
             return []
+        # 建索引时已校验模型；查询也必须校验，避免进程内切换模型后
+        # 用不同 embedding 空间静默返回看似正常但实际错误的结果。
+        if self._model is not None:
+            self.check_model(encoder.model_info())
         vecs = np.asarray(encoder.encode_text(items), dtype=np.float32)
         if vecs.ndim == 1:
             vecs = vecs.reshape(1, -1)

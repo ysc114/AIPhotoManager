@@ -325,6 +325,14 @@ class _OverviewMixinMixin:
         if row < 0 or row >= self.content_stack.count():
             return
 
+        search_bar = getattr(self, "search_bar", None)
+        if search_bar is not None:
+            search_bar._debounce.stop()
+            search_bar._hide_panel()
+        panel = getattr(self, "_global_search", None)
+        if panel is not None and panel.isVisible():
+            panel.hide_panel()
+
         self.content_stack.setCurrentIndex(row)
         self._fade_in_page()
 

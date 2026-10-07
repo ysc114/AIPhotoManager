@@ -9,6 +9,17 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtWidgets import QApplication
 
 from ui.components.global_search import GlobalSearchPanel
+from tests.test_global_search import _SyncSemanticWorker
+
+
+def settle(app, frames=6, dt=0.02):
+    """循环处理事件（等待后台检索结果回填）。"""
+    import time
+
+    for _ in range(frames):
+        t0 = time.time()
+        app.processEvents()
+        time.sleep(max(0.0, dt - (time.time() - t0)))
 
 
 def _group(cid, name, gtype, serial=1):
@@ -101,6 +112,9 @@ class PanelFilterTests(unittest.TestCase):
             with mock.patch("core.identity.get_reader", return_value=stub), \
                     mock.patch("core.visual_search.get_index",
                                return_value=_FakeIndex([])), \
+                    mock.patch("core.visual_search.read_index_status",
+                               return_value={"state": "missing", "indexed": 0,
+                                             "stale": 0, "photos_total": 2}), \
                     mock.patch("core.visual_search.get_encoder",
                                return_value=_FakeLoadedEncoder()):
                 # 非空查询：空查询在 handler 里会短路（只展示最近搜索）
@@ -133,9 +147,15 @@ class PanelFilterTests(unittest.TestCase):
             with mock.patch("core.identity.get_reader", return_value=stub), \
                     mock.patch("core.visual_search.get_index",
                                return_value=idx), \
+                    mock.patch("core.visual_search.read_index_status",
+                               return_value={"state": "ready", "indexed": 2,
+                                             "stale": 0, "photos_total": 2}), \
                     mock.patch("core.visual_search.get_encoder",
-                               return_value=_FakeLoadedEncoder()):
+                               return_value=_FakeLoadedEncoder()), \
+                    mock.patch("ui.main_window_v3._SemanticQueryWorker",
+                               _SyncSemanticWorker):
                 win._on_global_search_query(stem)
+                settle(QApplication.instance(), 8)   # 等后台语义结果回填
             badges = [i.get("badge") for i in win._global_search._items]
             self.assertNotIn("照片", badges, "只看收藏时不重复列出照片分区")
             sem_paths = [i["payload"]["path"] for i in win._global_search._items

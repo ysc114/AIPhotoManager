@@ -11,7 +11,7 @@ search_bar.py —— 全局搜索框（macOS Spotlight / Finder 风格）
     photo_activated(str)  照片本地路径
 """
 
-from PySide6.QtCore import Qt, QTimer, QRectF, QSize, Signal, QPoint
+from PySide6.QtCore import Qt, QTimer, QRectF, QSize, Signal, QPoint, QEvent
 from PySide6.QtGui import QPainter, QColor, QLinearGradient, QRadialGradient, QFont
 from PySide6.QtWidgets import (
     QWidget, QLineEdit, QListWidget, QListWidgetItem, QLabel, QHBoxLayout,
@@ -151,6 +151,7 @@ class GlassSearchBar(QWidget):
         self._edit.setAttribute(Qt.WA_MacShowFocusRect, False)
         self._edit.textChanged.connect(self._on_text_changed)
         self._edit.returnPressed.connect(self._on_enter)
+        self._edit.installEventFilter(self)
 
         lay = QHBoxLayout(self)
         lay.setContentsMargins(0, 0, 0, 0)
@@ -233,6 +234,7 @@ class GlassSearchBar(QWidget):
         self._panel.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
         self._panel.setVerticalScrollMode(QListWidget.ScrollPerPixel)
         self._panel.itemClicked.connect(self._on_item_clicked)
+        self._panel.installEventFilter(self)
 
     # --------------------------------------------------------
     # 行为
@@ -341,6 +343,7 @@ class GlassSearchBar(QWidget):
         self._panel_visible = True
 
     def _hide_panel(self):
+        self._debounce.stop()
         self._panel.hide()
         self._panel_visible = False
 
@@ -357,8 +360,31 @@ class GlassSearchBar(QWidget):
         self._hide_panel()
 
     def _on_enter(self):
-        if self._panel.count() and self._panel.item(0).flags() & Qt.ItemIsEnabled:
-            self._on_item_clicked(self._panel.item(0))
+        item = self._panel.currentItem()
+        if item is None or self._panel.itemWidget(item) is None:
+            item = next((self._panel.item(i) for i in range(self._panel.count())
+                         if self._panel.itemWidget(self._panel.item(i)) is not None), None)
+        if item is not None:
+            self._on_item_clicked(item)
+
+    def eventFilter(self, obj, event):
+        if obj in (self._edit, self._panel) and event.type() == QEvent.KeyPress:
+            if event.key() == Qt.Key_Escape:
+                self._hide_panel()
+                return True
+            if self._panel_visible and event.key() in (Qt.Key_Down, Qt.Key_Up):
+                rows = [i for i in range(self._panel.count())
+                        if self._panel.itemWidget(self._panel.item(i)) is not None]
+                if rows:
+                    current = self._panel.currentRow()
+                    step = 1 if event.key() == Qt.Key_Down else -1
+                    pos = rows.index(current) + step if current in rows else (0 if step > 0 else len(rows) - 1)
+                    self._panel.setCurrentRow(rows[max(0, min(pos, len(rows) - 1))])
+                return True
+            if obj is self._panel and event.key() in (Qt.Key_Return, Qt.Key_Enter):
+                self._on_enter()
+                return True
+        return super().eventFilter(obj, event)
 
     def clear(self):
         self._edit.clear()

@@ -38,7 +38,8 @@ def auto_organize(
     target_folder,
     mode="copy",
     remove_duplicates=True,
-    progress_callback=None
+    progress_callback=None,
+    cancelled=None,
 ):
 
     total = len(image_paths)
@@ -55,12 +56,23 @@ def auto_organize(
         "errors": [],
     }
 
+    def should_stop():
+        if cancelled is not None and cancelled():
+            stats["cancelled"] = True
+            return True
+        return False
+
+    if should_stop():
+        return stats
+
     existing_hashes = set()
     if remove_duplicates and os.path.exists(target_folder):
         if progress_callback:
             progress_callback(0, total, "正在扫描已有文件...")
         for root, dirs, files in os.walk(target_folder):
             for f in files:
+                if should_stop():
+                    return stats
                 fpath = os.path.join(root, f)
                 try:
                     existing_hashes.add(get_file_hash(fpath))
@@ -68,6 +80,8 @@ def auto_organize(
                     pass
 
     for idx, image_path in enumerate(image_paths):
+        if should_stop():
+            break
         try:
             if progress_callback:
                 progress_callback(
@@ -102,6 +116,10 @@ def auto_organize(
                 advice = advisor.generate_ai_advice(category_en, category_cn_raw, quality, scores, image_path)
                 category_cn = advice["category_cn"]
 
+            # Inference cannot be interrupted safely; stop before copying once
+            # the current inference has returned.
+            if should_stop():
+                break
             dest_dir = os.path.join(target_folder, category_cn)
             os.makedirs(dest_dir, exist_ok=True)
 
@@ -133,7 +151,7 @@ def auto_organize(
                     f"失败：{os.path.basename(image_path)} - {e}"
                 )
 
-    if progress_callback:
+    if progress_callback and not stats.get("cancelled"):
         progress_callback(total, total, "自动分类完成")
 
     return stats

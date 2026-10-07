@@ -552,7 +552,7 @@ class IdentityManager:
             print(f"[IdentityManager] 合并决策记录写入失败（可忽略，"
                   f"仅影响撤销）：{e}")
 
-    def _library_md5_set(self, paths):
+    def _library_md5_set(self, paths, cancelled=None):
         """已入库照片的内容 MD5 集合（mtime+size 缓存 + 流式读）。
 
         之前每次都 `fh.read()` 整文件读入内存算全库 MD5：
@@ -564,6 +564,8 @@ class IdentityManager:
 
         out = set()
         for p in paths:
+            if cancelled is not None and cancelled():
+                break
             if not os.path.exists(p):
                 continue
             try:
@@ -572,7 +574,8 @@ class IdentityManager:
                 continue
         return out
 
-    def analyze_new_photos(self, photos_dir=None, progress_callback=None):
+    def analyze_new_photos(self, photos_dir=None, progress_callback=None,
+                           cancelled=None):
         """增量分析：扫描 photos/ 中未入库照片，Fursee 入库 + 定向聚类。
 
         安全设计（P-C4-C4 踩坑后固化）：
@@ -586,11 +589,26 @@ class IdentityManager:
 
         返回 {"scanned": 扫描图片数, "new": 新增处理数,
               "skipped": 已存在数, "failed": 失败数}
+        cancelled 可选回调：在文件边界停止；已完成图片仍会增量分组。
+        传入回调时额外返回 cancelled 和 completed（成功处理数）。
         """
+        was_cancelled = False
+
+        def should_stop():
+            nonlocal was_cancelled
+            if cancelled is not None and cancelled():
+                was_cancelled = True
+            return was_cancelled
+
+        empty = {"scanned": 0, "new": 0, "skipped": 0, "failed": 0}
+        if should_stop():
+            return {**empty, "cancelled": True, "completed": 0}
         if photos_dir is None:
             photos_dir = os.path.join(os.path.dirname(self.db.db_path), "photos")
         if not os.path.isdir(photos_dir):
-            return {"scanned": 0, "new": 0, "skipped": 0, "failed": 0}
+            if cancelled is not None:
+                empty.update(cancelled=False, completed=0)
+            return empty
 
         exts = {".jpg", ".jpeg", ".png", ".webp"}
         files = sorted(
@@ -607,6 +625,7 @@ class IdentityManager:
             for f in files
             if os.path.join(photos_dir, f).replace("\\", "/") not in existing
         ]
+        skipped = len(files) - len(new_files)
         # MD5 内容级去重（防再发生）：photos/ 中同一图片的 (1) 副本文件
         # 文件名不同但内容相同——按 path 查重拦不住，会各自入库建组造成
         # "重复角色"。这里对未入库文件计算 MD5，与已入库图片的 MD5 比对，
@@ -614,21 +633,27 @@ class IdentityManager:
         if new_files:
             from core.duplicates import cached_md5
 
-            known_md5 = self._library_md5_set(existing)
+            known_md5 = self._library_md5_set(existing, should_stop)
             kept = []
             for p in new_files:
+                if should_stop():
+                    break
                 try:
                     m = cached_md5(p)
                 except OSError:
                     kept.append(p)  # 读不到按原逻辑处理
                     continue
                 if m in known_md5:
+                    skipped += 1
                     continue  # 与已入库图片内容相同 → 副本，跳过
                 kept.append(p)
             new_files = kept
         total = len(new_files)
-        failed = 0
+        failed = processed = 0
         for i, path in enumerate(new_files, 1):
+            if should_stop():
+                break
+            processed += 1
             try:
                 self._process_single_image(path)
             except Exception as e:
@@ -636,7 +661,8 @@ class IdentityManager:
                 print(f"[analyze_new_photos] 失败 {os.path.basename(path)}: {e}")
             if progress_callback:
                 progress_callback(i, total)
-        if total:
+        should_stop()
+        if processed:
             try:
                 assign_result = self.cluster.incremental_assign(
                     embedding_type="fursuit_fursee",
@@ -656,14 +682,17 @@ class IdentityManager:
                 )
             except Exception as e:
                 print(f"[analyze_new_photos] Face 增量分配失败: {e}")
-        return {
+        result = {
             "scanned": len(files),
-            "new": total,
-            "skipped": len(files) - total,
+            "new": processed,
+            "skipped": skipped,
             "failed": failed,
         }
+        if cancelled is not None:
+            result.update(cancelled=was_cancelled, completed=processed - failed)
+        return result
 
-    def analyze_paths(self, paths, progress_callback=None):
+    def analyze_paths(self, paths, progress_callback=None, cancelled=None):
         """增量分析用户选择的文件列表（GUI「添加照片」入口）。
 
         与 analyze_new_photos 共用同一条安全增量链路：
@@ -677,23 +706,38 @@ class IdentityManager:
         - 兽装绝不走旧 CLIP fursuit_visual 链路（fursuit_visual 冻结）
 
         progress_callback: cb(current, total, status_str)
+        cancelled: 可选 cb()，在文件/去重边界停止，已完成图片仍会归组。
 
         返回 {"scanned", "new", "fursuit", "person", "other",
               "dup_path", "dup_md5", "failed",
               "joined_fursee", "created_fursee",
               "joined_face", "created_face"}
+        传入 cancelled 时额外返回 cancelled 和 completed（成功处理数）。
         """
-        if not paths:
-            return {"scanned": 0, "new": 0, "fursuit": 0, "person": 0,
-                    "other": 0, "dup_path": 0, "dup_md5": 0, "failed": 0,
-                    "joined_fursee": 0, "created_fursee": 0,
-                    "joined_face": 0, "created_face": 0}
+        was_cancelled = False
+
+        def should_stop():
+            nonlocal was_cancelled
+            if cancelled is not None and cancelled():
+                was_cancelled = True
+            return was_cancelled
+
+        empty = {"scanned": 0, "new": 0, "fursuit": 0, "person": 0,
+                 "other": 0, "dup_path": 0, "dup_md5": 0, "failed": 0,
+                 "joined_fursee": 0, "created_fursee": 0,
+                 "joined_face": 0, "created_face": 0}
+        if should_stop() or not paths:
+            if cancelled is not None:
+                empty.update(cancelled=was_cancelled, completed=0)
+            return empty
 
         exts = {".jpg", ".jpeg", ".png", ".webp"}
         # 归一化 + 过滤非图片 + path 去重保序
         norm_paths = []
         seen_path = set()
         for raw in paths:
+            if should_stop():
+                break
             p = str(raw).replace("\\", "/")
             if os.path.splitext(p)[1].lower() not in exts:
                 continue
@@ -718,6 +762,8 @@ class IdentityManager:
         dup_path = dup_md5 = 0
         batch_md5 = set()
         for p in norm_paths:
+            if should_stop():
+                break
             if p in existing:
                 dup_path += 1
                 continue
@@ -727,7 +773,9 @@ class IdentityManager:
                 to_process.append(p)  # 读不到按原逻辑处理
                 continue
             if known_md5 is None:
-                known_md5 = self._library_md5_set(existing)
+                known_md5 = self._library_md5_set(existing, should_stop)
+                if should_stop():
+                    break
             if m in known_md5 or m in batch_md5:
                 dup_md5 += 1
                 continue
@@ -736,33 +784,45 @@ class IdentityManager:
 
         total = len(to_process)
         n_fursuit = n_person = n_other = failed = 0
+        processed = 0
         for i, path in enumerate(to_process, 1):
+            if should_stop():
+                break
+            processed += 1
             try:
                 # L1 路由统计（与 _process_single_image 内部一致；缓存命中）
                 l1_info = self.embedder.get_l1_info(path)
+                if should_stop():
+                    processed -= 1
+                    break
                 route = self.embedder.route_l1(l1_info)
                 status_msg = os.path.basename(path)
                 if route == "fursuit":
-                    n_fursuit += 1
                     # Fursee 引擎启动/模型加载会阻塞本线程最长 240s：
                     # 提前把状态同步给 UI，避免进度条"卡住"像死机
                     adapter = getattr(self, "_fursee_adapter", None)
                     if adapter is None or getattr(adapter, "state", "ready") != "ready":
                         status_msg = "正在启动 Fursee 识别引擎（首次约 1 分钟）…"
+                if progress_callback:
+                    progress_callback(i, total, status_msg)
+                if should_stop():
+                    processed -= 1
+                    break
+                if route == "fursuit":
+                    n_fursuit += 1
                 elif route == "person":
                     n_person += 1
                 else:
                     n_other += 1
-                if progress_callback:
-                    progress_callback(i, total, status_msg)
                 self._process_single_image(path)
             except Exception as e:
                 failed += 1
                 print(f"[analyze_paths] 失败 {os.path.basename(path)}: {e}")
+        should_stop()
 
         joined_fursee = created_fursee = 0
         joined_face = created_face = 0
-        if total:
+        if processed:
             try:
                 r = self.cluster.incremental_assign(
                     embedding_type="fursuit_fursee", threshold=0.79, margin=0.02
@@ -780,9 +840,9 @@ class IdentityManager:
             except Exception as e:
                 print(f"[analyze_paths] Face 增量分配失败: {e}")
 
-        return {
+        result = {
             "scanned": len(norm_paths),
-            "new": total,
+            "new": processed,
             "fursuit": n_fursuit,
             "person": n_person,
             "other": n_other,
@@ -794,6 +854,9 @@ class IdentityManager:
             "joined_face": joined_face,
             "created_face": created_face,
         }
+        if cancelled is not None:
+            result.update(cancelled=was_cancelled, completed=processed - failed)
+        return result
 
     def close(self):
         # 共享只读 reader：进程级复用，close() 为 no-op（由 get_reader 持有）

@@ -329,6 +329,7 @@ class _RoleCenterMixinMixin:
 
         refresh_btn.clicked.connect(lambda _, k=page_key: self._load_groups_into_page(k))
         analyze_btn.clicked.connect(lambda _, k=page_key: self._analyze_new_photos(k))
+        self._group_pages[page_key]["analyze_btn"] = analyze_btn
         back_btn.clicked.connect(lambda _, k=page_key: self._back_to_group_list(k))
         rename_btn.clicked.connect(lambda _, k=page_key: self._rename_current_group(k))
         merge_btn.clicked.connect(lambda _, k=page_key: self._merge_current_group(k))
@@ -816,8 +817,10 @@ class _RoleCenterMixinMixin:
         incremental_assign（不重跑 DBSCAN、不拆散已有组）。完成后自动刷新。
         """
         from ui.main_window_v3 import _ScanDirWorker
-        if getattr(self, "_scan_worker", None) and self._scan_worker.isRunning():
-            self.statusBar().showMessage("分析已在进行中…", 3000)
+        if getattr(self, "_scan_worker", None) is not None:
+            if self._scan_worker.isRunning():
+                self._scan_worker.requestInterruption()
+                self.statusBar().showMessage("正在取消分析，等待当前照片处理结束…")
             return
         state = self._group_pages.get(page_key)
         if state is None:
@@ -829,6 +832,7 @@ class _RoleCenterMixinMixin:
         worker.failed.connect(self._on_scan_failed)
         self._scan_worker = worker
         state["refresh_btn"].setEnabled(False)
+        state["analyze_btn"].setText("取消分析")
         self.statusBar().showMessage("正在分析新照片…（后台运行，界面可继续操作）")
         worker.start()
 
@@ -840,11 +844,21 @@ class _RoleCenterMixinMixin:
 
 
     def _on_scan_done(self, result):
-        reap_thread(getattr(self, "_scan_worker", None))
+        if not reap_thread(getattr(self, "_scan_worker", None)):
+            QTimer.singleShot(100, lambda: self._on_scan_done(result))
+            return
         self._scan_worker = None
         state = self._group_pages.get(self._scan_worker_page)
         if state is not None:
             state["refresh_btn"].setEnabled(True)
+            state["analyze_btn"].setText("📥 分析新照片")
+        if getattr(self, "_sem_closing", False):
+            return
+        if result.get("cancelled"):
+            if not getattr(self, "_sem_closing", False):
+                self._refresh_after_ingest()
+            self.statusBar().showMessage("分析已取消，已完成结果已保留", 8000)
+            return
         # 统一刷新：分组页（含本页）+ 总览 + 照片页列表 + 待处理统计
         self._refresh_after_ingest()
         self.statusBar().showMessage("分析完成，列表已刷新", 8000)
@@ -863,12 +877,16 @@ class _RoleCenterMixinMixin:
 
 
     def _on_scan_failed(self, err):
-        reap_thread(getattr(self, "_scan_worker", None))
+        if not reap_thread(getattr(self, "_scan_worker", None)):
+            QTimer.singleShot(100, lambda: self._on_scan_failed(err))
+            return
         self._scan_worker = None
         state = self._group_pages.get(self._scan_worker_page)
         if state is not None:
             state["refresh_btn"].setEnabled(True)
-        QMessageBox.critical(self, "分析失败", f"分析新照片时出错：{err}")
+            state["analyze_btn"].setText("📥 分析新照片")
+        if not getattr(self, "_sem_closing", False):
+            QMessageBox.critical(self, "分析失败", f"分析新照片时出错：{err}")
 
     # --------------------------------------------------------
     # 角色中心 2.0：搜索 / 筛选 / 排序（纯 UI，只读 get_groups 数据）

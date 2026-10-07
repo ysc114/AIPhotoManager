@@ -24,6 +24,10 @@ models/
 *.pth
 *.onnx
 *.bin
+!models/
+models/*
+!models/superres_epoch100-44c6958e.pth
+!models/README.md
 
 # --- User Data (照片/分类/数据库) ---
 photos/

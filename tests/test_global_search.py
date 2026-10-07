@@ -5,6 +5,7 @@ MainWindow 集成（入口按钮、Ctrl+K 与 Ctrl+Shift+F 快捷键、结果分
 """
 import os
 import sys
+import threading
 import time
 import unittest
 
@@ -13,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QShortcut
+from PySide6.QtCore import QObject, QTimer, Signal
 from PySide6.QtWidgets import QApplication, QLabel
 from PySide6.QtTest import QTest
 from unittest import mock
@@ -172,7 +174,10 @@ class GlobalSearchWindowTests(unittest.TestCase):
 
         # 情形1：索引为空 → 提示行 + 不启动真实构建（_sem_building 预置）
         self.win._sem_building = True
-        with mock.patch("core.visual_search.get_index", return_value=_FakeIndex(0)):
+        with mock.patch("core.visual_search.get_index", return_value=_FakeIndex(0)), \
+                mock.patch("core.visual_search.read_index_status",
+                           return_value={"state": "missing", "indexed": 0,
+                                         "stale": 0, "photos_total": 2}):
             self.win._on_global_search_query("白狼")
         settle(self.app, 4)
         texts = [l.text() for l in self.win._global_search.findChildren(QLabel)]
@@ -180,9 +185,15 @@ class GlobalSearchWindowTests(unittest.TestCase):
 
         # 情形2：索引就绪 + 模型已加载 → 直接给语义结果行
         with mock.patch("core.visual_search.get_index", return_value=_FakeIndex(2)), \
+                mock.patch("core.visual_search.read_index_status",
+                           return_value={"state": "ready", "indexed": 2,
+                                         "stale": 0, "photos_total": 2}), \
                 mock.patch("core.visual_search.get_encoder",
-                           return_value=_FakeLoadedEncoder()):
+                           return_value=_FakeLoadedEncoder()), \
+                mock.patch("ui.main_window_v3._SemanticQueryWorker",
+                           _SyncSemanticWorker):
             self.win._on_global_search_query("白狼")
+            settle(self.app, 6)      # 等后台结果回填
         settle(self.app, 4)
         items = self.win._global_search._items
         sem = [i for i in items if i.get("badge") == "语义"]
@@ -191,6 +202,9 @@ class GlobalSearchWindowTests(unittest.TestCase):
 
         # 情形3：索引就绪但模型未加载 → 后台预热（不阻塞主线程），先给提示行
         with mock.patch("core.visual_search.get_index", return_value=_FakeIndex(2)), \
+                mock.patch("core.visual_search.read_index_status",
+                           return_value={"state": "ready", "indexed": 2,
+                                         "stale": 0, "photos_total": 2}), \
                 mock.patch("core.visual_search.get_encoder",
                            return_value=_FakeColdEncoder()), \
                 mock.patch.object(self.win, "_start_semantic_build") as warm:
@@ -207,6 +221,195 @@ class GlobalSearchWindowTests(unittest.TestCase):
         self.win._global_search.hide_panel()
         settle(self.app, 10)
 
+    def test_semantic_stale_result_triggers_latest(self):
+        """过期语义结果不得回填：应补跑最新一次查询。"""
+        win = self.win
+        token_old = object()
+        win._sem_pending = (object(), "白狼", ["白狼"], 4)
+        with mock.patch.object(win, "_spawn_semantic_query") as spawn, \
+                mock.patch.object(win, "_on_global_search_query") as rerender:
+            win._on_semantic_query_done(
+                token_old, [{"photo_id": 1, "path": "C:/fake/x.jpg",
+                             "similarity": 0.9}])
+        self.assertTrue(spawn.called, "应补跑最新查询")
+        self.assertFalse(rerender.called, "过期结果不得回填")
+
+    def test_semantic_result_dropped_when_query_changed(self):
+        """令牌匹配但面板查询已改 → 丢弃（不覆盖用户当前结果）。"""
+        win = self.win
+        token = object()
+        win._sem_pending = (token, "白狼", ["白狼"], 4)
+        win._global_search.set_query("其它查询")
+        with mock.patch.object(win, "_on_global_search_query") as rerender:
+            win._on_semantic_query_done(token, [])
+        self.assertFalse(rerender.called)
+
+    def test_semantic_result_renders_when_matching(self):
+        """令牌与查询都匹配 → 用后台结果重渲染语义分区。"""
+        win = self.win
+        token = object()
+        win._sem_pending = (token, "白狼", ["白狼"], 4)
+        win._global_search.set_query("白狼")
+        hits = [{"photo_id": 1, "path": "C:/fake/p1.jpg", "similarity": 0.8}]
+        with mock.patch.object(win, "_on_global_search_query") as rerender:
+            win._on_semantic_query_done(token, hits)
+        self.assertTrue(rerender.called)
+        args, kwargs = rerender.call_args
+        self.assertEqual(args[0], "白狼")
+        self.assertEqual(kwargs["_sem_result"][1], hits)
+
+    def test_close_reaps_semantic_query_worker(self):
+        """关窗时回收后台语义检索线程。"""
+        from PySide6.QtCore import QThread
+
+        class _Slow(QThread):
+            def run(self):
+                self.msleep(300)
+
+        win = self.win
+        w = _Slow(win)
+        win._sem_query_worker = w
+        w.start()
+        self.assertTrue(w.isRunning())
+        win.close()
+        self.assertFalse(w.isRunning(), "关窗应等后台语义检索结束")
+        self.assertIsNone(win._sem_query_worker)
+
+    def test_semantic_worker_honors_pre_cancel(self):
+        """worker 启动前已请求中断时，不应加载索引或模型。"""
+        from ui.main_window_v3 import _SemanticQueryWorker
+
+        class _PreCancelled(_SemanticQueryWorker):
+            def isInterruptionRequested(self):
+                return True
+
+        w = _PreCancelled(object(), ["白狼"], 4)
+        got = []
+        w.cancelled.connect(got.append, Qt.DirectConnection)
+        with mock.patch("core.visual_search.get_index",
+                        side_effect=AssertionError("不应加载索引")):
+            w.run()
+        self.assertEqual(len(got), 1)
+
+    def test_semantic_failure_renders_retry_item(self):
+        """后台失败应显示可重试条目，而不是静默空结果。"""
+        win = self.win
+        token = object()
+        win._sem_pending = (token, "白狼", ["白狼"], 4)
+        win._global_search.set_query("白狼")
+        win._on_semantic_query_failed(token, "模型暂不可用")
+        retry = [i for i in win._global_search._items
+                 if (i.get("payload") or {}).get("kind") == "semantic_retry"]
+        self.assertEqual(len(retry), 1)
+        self.assertIn("重试", retry[0]["title"])
+
+    def test_new_semantic_query_requests_cancellation(self):
+        """新查询到来时应请求旧 worker 中断，并等待其结束后补跑。"""
+        win = self.win
+        old = mock.Mock()
+        old.isRunning.return_value = True
+        win._sem_query_worker = old
+        with mock.patch.object(win, "_spawn_semantic_query") as spawn:
+            self.assertFalse(win._start_semantic_query("新查询", ["新查询"], 4))
+        old.requestInterruption.assert_called_once_with()
+        spawn.assert_not_called()
+        # 避免测试 teardown 把这个 mock 当作仍在运行的 QThread。
+        win._sem_query_worker = None
+
+    def test_rapid_queries_keep_only_latest_pending(self):
+        """连续快速输入只保留最新查询，运行中的旧任务持续收到取消请求。"""
+        win = self.win
+        old = mock.Mock()
+        old.isRunning.return_value = True
+        win._sem_query_worker = old
+        for q in ("白", "白狼", "白狼 展会"):
+            win._start_semantic_query(q, [q], 4)
+        self.assertEqual(win._sem_pending[1], "白狼 展会")
+        self.assertEqual(old.requestInterruption.call_count, 3)
+        win._sem_query_worker = None
+
+    def test_plain_photo_filename_search(self):
+        """普通文件名搜索仍应返回照片分区，不依赖语义模型。"""
+        photos = os.path.join(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))), "photos")
+        names = sorted(n for n in os.listdir(photos)
+                       if os.path.splitext(n)[1].lower()
+                       in (".jpg", ".jpeg", ".png", ".webp"))
+        self.assertTrue(names)
+        stem = os.path.splitext(names[0])[0]
+        with mock.patch("core.visual_search.read_index_status",
+                        return_value={"state": "missing", "indexed": 0,
+                                      "stale": 0, "photos_total": 0}):
+            self.win._on_global_search_query(stem)
+        photos_found = [i for i in self.win._global_search._items
+                        if i.get("badge") == "照片"]
+        self.assertTrue(any(i["title"] == names[0] for i in photos_found))
+
+    def test_semantic_worker_cancels_after_running_search(self):
+        """生产 worker 在检索返回后应响应运行中的中断请求。"""
+        from ui.main_window_v3 import _SemanticQueryWorker
+
+        entered = threading.Event()
+
+        class _SlowIndex:
+            def search_by_text(self, texts, encoder, top_k=4):
+                entered.set()
+                time.sleep(0.08)
+                return [{"path": "C:/fake/old.jpg", "similarity": 0.9}]
+
+        w = _SemanticQueryWorker(object(), ["旧查询"], 4)
+        cancelled = []
+        done = []
+        w.cancelled.connect(cancelled.append, Qt.DirectConnection)
+        w.done.connect(lambda *args: done.append(args), Qt.DirectConnection)
+        with mock.patch("core.visual_search.get_index", return_value=_SlowIndex()), \
+                mock.patch("core.visual_search.get_encoder", return_value=object()):
+            w.start()
+            self.assertTrue(entered.wait(1.0), "worker 应已进入检索")
+            w.requestInterruption()
+            self.assertTrue(w.wait(2000), "worker 应在检索返回后安全退出")
+        self.assertEqual(len(cancelled), 1)
+        self.assertEqual(done, [], "取消后的旧结果不得发出 done")
+
+    def test_semantic_worker_exception_emits_failed(self):
+        """生产 worker 异常应走 failed，不得卡死或误报 done。"""
+        from ui.main_window_v3 import _SemanticQueryWorker
+
+        w = _SemanticQueryWorker(object(), ["白狼"], 4)
+        failed = []
+        w.failed.connect(lambda token, err: failed.append(err), Qt.DirectConnection)
+        with mock.patch("core.visual_search.get_index",
+                        side_effect=RuntimeError("索引不可用")):
+            w.run()
+        self.assertEqual(failed, ["索引不可用"])
+
+    def test_index_load_failure_starts_recovery(self):
+        """FAISS 加载失败时应重置可重建缓存并启动后台恢复。"""
+        win = self.win
+        token = object()
+        win._sem_pending = (token, "白狼", ["白狼"], 4)
+        win._global_search.set_query("白狼")
+        with mock.patch.object(win, "_reset_semantic_index_cache") as reset, \
+                mock.patch.object(win, "_start_semantic_build") as rebuild:
+            win._on_semantic_query_failed(token, "索引加载失败：bad file")
+        reset.assert_called_once_with()
+        rebuild.assert_called_once_with()
+
+    def test_index_build_failure_restores_retry_state(self):
+        """索引构建失败后必须清除 building 状态并显示重试入口。"""
+        win = self.win
+        win._sem_building = True
+        win._sem_worker = None
+        win._open_global_search()
+        settle(self.app, 4)
+        win._global_search.set_query("白狼")
+        win._on_semantic_build_failed("磁盘不可用")
+        self.assertFalse(win._sem_building)
+        self.assertIsNone(win._sem_worker)
+        retry = [i for i in win._global_search._items
+                 if (i.get("payload") or {}).get("kind") == "semantic_retry"]
+        self.assertEqual(len(retry), 1)
+
 
 class _FakeLoadedEncoder:
     """已加载的编码器桩：语义分区走「直接检索」分支。"""
@@ -220,6 +423,38 @@ class _FakeColdEncoder:
 
     def is_loaded(self):
         return False
+
+
+class _SyncSemanticWorker(QObject):
+    """同步桩：start() 里立刻发 done，测试无需等真线程/无需保持 patch 作用域。"""
+
+    done = Signal(object, object)
+    failed = Signal(object, str)
+
+    def __init__(self, token, texts, top_k, parent=None):
+        super().__init__(parent)
+        self._token = token
+        self._texts = list(texts or [])
+        self._top_k = int(top_k)
+
+    def start(self):
+        # 延迟一拍：模拟真线程的 queued 信号（结果在外层回调返回后才到）
+        QTimer.singleShot(0, self._emit)
+
+    def _emit(self):
+        from core.visual_search import get_encoder, get_index
+        try:
+            hits = get_index().search_by_text(
+                self._texts, get_encoder(), top_k=self._top_k)
+            self.done.emit(self._token, hits)
+        except Exception as e:
+            self.failed.emit(self._token, str(e))
+
+    def isRunning(self):
+        return False
+
+    def wait(self, *args, **kwargs):
+        return True
 
 
 class _FakeIndex:
@@ -237,7 +472,6 @@ class _FakeIndex:
              "similarity": 0.9 - i * 0.05}
             for i in range(self._n)
         ]
-
 
 if __name__ == "__main__":
     unittest.main()
